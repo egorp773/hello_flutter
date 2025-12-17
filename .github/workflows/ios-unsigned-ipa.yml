@@ -11,22 +11,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Ставим Flutter (можешь поменять версию на нужную)
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          # flutter-version: "3.24.5"   # если хочешь жёстко фиксировать версию
 
       - name: Flutter version
         run: flutter --version
 
       - name: Pub get
         run: flutter pub get
-
-      # (Опционально) если используешь build_runner/генерации
-      # - name: Build runner
-      #   run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build iOS (release, no codesign)
         run: flutter build ios --release --no-codesign
@@ -38,22 +32,20 @@ jobs:
           echo "=== build/ios/iphoneos ==="
           ls -la build/ios/iphoneos || true
 
-      # Упаковка Runner.app -> unsigned.ipa
       - name: Pack unsigned IPA from Runner.app
         run: |
           set -e
-
           APP_PATH="build/ios/iphoneos/Runner.app"
+
           if [ ! -d "$APP_PATH" ]; then
             echo "Runner.app not found at $APP_PATH"
-            echo "Try to inspect build/ios/iphoneos"
+            echo "Contents of build/ios/iphoneos:"
             ls -la build/ios/iphoneos || true
             exit 1
           fi
 
           rm -rf Payload
           mkdir -p Payload
-
           cp -R "$APP_PATH" Payload/Runner.app
 
           rm -f unsigned.ipa
