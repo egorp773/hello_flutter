@@ -1,10 +1,10 @@
-name: Build iOS unsigned IPA
+name: Build iOS unsigned IPA (Flutter)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build_ios:
+  build-ios:
     runs-on: macos-latest
 
     steps:
@@ -16,20 +16,46 @@ jobs:
         with:
           channel: stable
 
-      - name: Get packages
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Pub get
         run: flutter pub get
 
-      - name: Build iOS (no codesign)
+      - name: Build iOS (release, no codesign)
         run: flutter build ios --release --no-codesign
 
-      - name: Pack unsigned IPA
+      - name: Debug - list build outputs
         run: |
-          mkdir -p Payload
-          cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
-          zip -r Runner-unsigned.ipa Payload
+          echo "=== build/ios ==="
+          ls -la build/ios || true
+          echo "=== build/ios/iphoneos ==="
+          ls -la build/ios/iphoneos || true
 
-      - name: Upload artifact
+      - name: Pack unsigned IPA from Runner.app
+        run: |
+          set -e
+          APP_PATH="build/ios/iphoneos/Runner.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Runner.app not found at $APP_PATH"
+            echo "Contents of build/ios/iphoneos:"
+            ls -la build/ios/iphoneos || true
+            exit 1
+          fi
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/Runner.app
+
+          rm -f unsigned.ipa
+          /usr/bin/zip -r unsigned.ipa Payload
+
+          echo "=== unsigned.ipa created ==="
+          ls -la unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Runner-unsigned-ipa
-          path: Runner-unsigned.ipa
+          name: unsigned-ipa
+          path: unsigned.ipa
