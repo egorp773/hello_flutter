@@ -6,8 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:hello_flutter/core/bt_connection.dart';
-import 'package:hello_flutter/features/bt/bt_device_sheet.dart';
+import 'package:hello_flutter/core/wifi_connection.dart';
 
 /// ============================================================================
 /// Battery mock (потом заменим на реальную телеметрию)
@@ -90,7 +89,7 @@ class TerminalController extends StateNotifier<TerminalState> {
   final Ref ref;
   TerminalController(this.ref) : super(const TerminalState([]));
 
-  /// Отправка реальной команды в BLE-терминал (UART на ESP32).
+  /// Отправка реальной команды в WebSocket терминал.
   Future<void> send(String text) async {
     final t = text.trim();
     if (t.isEmpty) return;
@@ -98,8 +97,8 @@ class TerminalController extends StateNotifier<TerminalState> {
     // Локально показываем исходящую строку
     state = TerminalState([...state.lines, '→ $t']);
 
-    // Реальная отправка через BtConnectionController
-    await ref.read(btConnectionProvider.notifier).sendRaw(t);
+    // Реальная отправка через WifiConnectionController
+    await ref.read(wifiConnectionProvider.notifier).sendRaw(t);
   }
 
   void clear() => state = const TerminalState([]);
@@ -197,7 +196,7 @@ class ManualMapController extends StateNotifier<ManualMapState> {
   final Ref ref;
   ManualMapController(this.ref) : super(ManualMapState.initial());
 
-  bool get _isConnected => ref.read(btConnectionProvider).isConnected;
+  bool get _isConnected => ref.read(wifiConnectionProvider).isConnected;
 
   void setName(String name) {
     final clean = name.trim();
@@ -257,7 +256,7 @@ class ManualMapController extends StateNotifier<ManualMapState> {
     // direction теперь это нормализованный вектор направления от джойстика (-1..1)
     // Если джойстик в центре (нулевое направление), отправляем STOP
     if (direction.dx.abs() < 0.001 && direction.dy.abs() < 0.001) {
-      ref.read(btConnectionProvider.notifier).sendStop();
+      ref.read(wifiConnectionProvider.notifier).sendStop();
       return;
     }
 
@@ -275,21 +274,25 @@ class ManualMapController extends StateNotifier<ManualMapState> {
       _appendStroke(next);
     }
 
-    // Отправляем нормализованное направление напрямую в контроллер
-    // Координаты: dx - это движение влево/вправо (x),
-    // dy - это движение вверх/вниз (в экранных координатах вверх = отрицательное y)
+    // Преобразуем нормализованное направление в дифференциальные значения left/right
+    // Координаты: dx - это движение влево/вправо (поворот),
+    // dy - это движение вверх/вниз (вперёд/назад)
     // Для робота: вверх (вперёд) = положительное y, поэтому инвертируем
     final vx = direction.dx.clamp(-1.0, 1.0);
-    final vy = direction.dy.clamp(-1.0, 1.0);
+    final vy = -direction.dy
+        .clamp(-1.0, 1.0); // инвертируем для правильного направления
 
     // Получаем множитель скорости из настроек
     final speedMultiplier = ref.read(manualSpeedProvider);
 
-    // Отправляем команду: x - горизонталь (поворот), y - вертикаль (движение вперед/назад)
-    // Инвертируем y для правильного направления и применяем скорость
-    ref
-        .read(btConnectionProvider.notifier)
-        .sendDrive(vx, -vy, speedMultiplier: speedMultiplier);
+    // Дифференциальное управление:
+    // left = vy - vx (вперёд/назад минус поворот)
+    // right = vy + vx (вперёд/назад плюс поворот)
+    final left = ((vy - vx) * speedMultiplier * 100).round().clamp(-100, 100);
+    final right = ((vy + vx) * speedMultiplier * 100).round().clamp(-100, 100);
+
+    // Отправляем команду в формате M,left,right
+    ref.read(wifiConnectionProvider.notifier).sendMove(left, right);
   }
 
   void _appendStroke(Offset p) {
@@ -416,9 +419,10 @@ class KindMeta {
   });
 }
 
-const _kNeon = Color(0xFF3DE7FF);
-const _kGood = Color(0xFF38F6A7);
-const _kBad = Color(0xFFFF4D6D);
+// Черно-белая цветовая схема
+const _kNeon = Colors.white;
+const _kGood = Colors.white;
+const _kBad = Color(0xFF6E6E6E);
 
 const List<KindMeta> kKinds = [
   KindMeta(
@@ -464,29 +468,22 @@ class ManualControlScreen extends ConsumerStatefulWidget {
 }
 
 class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
-  Future<void> _toggleBtConnection() async {
-    final bt = ref.read(btConnectionProvider);
-    final ctrl = ref.read(btConnectionProvider.notifier);
+  Future<void> _toggleWifiConnection() async {
+    final wifi = ref.read(wifiConnectionProvider);
+    final ctrl = ref.read(wifiConnectionProvider.notifier);
 
-    if (bt.isConnected) {
+    if (wifi.isConnected) {
       await ctrl.disconnect();
       return;
     }
 
-    // Открываем стандартный лист выбора устройств, который уже
-    // делает реальный scan + connectTo() к ESP32 по BLE.
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withOpacity(0.55),
-      builder: (_) => const BtDevicePickerSheet(),
-    );
+    // Подключаемся к WebSocket
+    await ctrl.connect();
   }
 
   @override
   Widget build(BuildContext context) {
-    final bt = ref.watch(btConnectionProvider);
+    final wifi = ref.watch(wifiConnectionProvider);
     final battery = ref.watch(batteryPercentProvider);
     final speed = ref.watch(manualSpeedProvider); // ✅ скорость
     final s = ref.watch(manualMapProvider);
@@ -518,7 +515,7 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
 
         return Stack(
           children: [
-            Positioned.fill(child: _PremiumBG(isConnected: bt.isConnected)),
+            Positioned.fill(child: _PremiumBG(isConnected: wifi.isConnected)),
             const Positioned.fill(child: _Vignette()),
 
             SafeArea(
@@ -547,9 +544,9 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
                       height: statusH,
                       child: _StatusPanel(
                         uiScale: uiScale,
-                        bt: bt,
+                        wifi: wifi,
                         batteryPercent: battery,
-                        onToggle: _toggleBtConnection,
+                        onToggle: _toggleWifiConnection,
                       ),
                     ),
                     SizedBox(height: gap),
@@ -576,13 +573,13 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
                       child: _ControlsArea(
                         uiScale: uiScale,
                         speedFactor: speed, // ✅ передали скорость
-                        btConnected: bt.isConnected,
+                        wifiConnected: wifi.isConnected,
                         stage: s.stage,
                         mapName: s.mapName,
                         kind: s.kind,
                         onStartWizard: () => _startWizard(
                           context,
-                          bt,
+                          wifi,
                           s.mapName,
                         ),
                         onQuickStart: () =>
@@ -655,9 +652,9 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
     return s[0].toUpperCase() + s.substring(1);
   }
 
-  Future<void> _startWizard(
-      BuildContext context, BtConnectionState bt, String? existingName) async {
-    if (!bt.isConnected) {
+  Future<void> _startWizard(BuildContext context, WifiConnectionState wifi,
+      String? existingName) async {
+    if (!wifi.isConnected) {
       ref.read(noticeProvider.notifier).show(const NoticeState(
             title: 'Подключение',
             message: 'Подключитесь к роботу.',
@@ -749,7 +746,7 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
 class _ControlsArea extends ConsumerWidget {
   final double uiScale;
   final double speedFactor; // ✅ скорость
-  final bool btConnected;
+  final bool wifiConnected;
 
   final ManualStage stage;
   final String? mapName;
@@ -768,7 +765,7 @@ class _ControlsArea extends ConsumerWidget {
   const _ControlsArea({
     required this.uiScale,
     required this.speedFactor,
-    required this.btConnected,
+    required this.wifiConnected,
     required this.stage,
     required this.mapName,
     required this.kind,
@@ -813,13 +810,13 @@ class _ControlsArea extends ConsumerWidget {
             mode == ControlMode.joystick
                 ? _AnalogJoystick(
                     uiScale: uiScale,
-                    enabled: btConnected,
+                    enabled: wifiConnected,
                     speedFactor: speedFactor,
                     onMove: onMove,
                   )
                 : _ArrowControls(
                     uiScale: uiScale,
-                    enabled: btConnected,
+                    enabled: wifiConnected,
                     speedFactor: speedFactor,
                   ),
           ],
@@ -846,13 +843,13 @@ class _ControlsArea extends ConsumerWidget {
             mode == ControlMode.joystick
                 ? _AnalogJoystick(
                     uiScale: uiScale,
-                    enabled: btConnected,
+                    enabled: wifiConnected,
                     speedFactor: speedFactor,
                     onMove: onMove,
                   )
                 : _ArrowControls(
                     uiScale: uiScale,
-                    enabled: btConnected,
+                    enabled: wifiConnected,
                     speedFactor: speedFactor,
                   ),
           ],
@@ -1199,9 +1196,11 @@ class _ArrowControls extends ConsumerWidget {
                   enabled: enabled,
                   color: _kGood,
                   onPressed: () {
-                    ref
-                        .read(btConnectionProvider.notifier)
-                        .sendArrowCommand('F');
+                    // Вперёд: M,50,50
+                    ref.read(wifiConnectionProvider.notifier).sendMove(50, 50);
+                  },
+                  onReleased: () {
+                    ref.read(wifiConnectionProvider.notifier).sendStop();
                   },
                 ),
                 SizedBox(height: gap),
@@ -1215,9 +1214,13 @@ class _ArrowControls extends ConsumerWidget {
                       enabled: enabled,
                       color: _kNeon,
                       onPressed: () {
+                        // Влево (поворот на месте): M,-50,50
                         ref
-                            .read(btConnectionProvider.notifier)
-                            .sendArrowCommand('L');
+                            .read(wifiConnectionProvider.notifier)
+                            .sendMove(-50, 50);
+                      },
+                      onReleased: () {
+                        ref.read(wifiConnectionProvider.notifier).sendStop();
                       },
                     ),
                     SizedBox(width: gap),
@@ -1227,7 +1230,7 @@ class _ArrowControls extends ConsumerWidget {
                       enabled: enabled,
                       color: _kBad,
                       onPressed: () {
-                        ref.read(btConnectionProvider.notifier).sendStop();
+                        ref.read(wifiConnectionProvider.notifier).sendStop();
                       },
                     ),
                     SizedBox(width: gap),
@@ -1237,9 +1240,13 @@ class _ArrowControls extends ConsumerWidget {
                       enabled: enabled,
                       color: _kNeon,
                       onPressed: () {
+                        // Вправо (поворот на месте): M,50,-50
                         ref
-                            .read(btConnectionProvider.notifier)
-                            .sendArrowCommand('R');
+                            .read(wifiConnectionProvider.notifier)
+                            .sendMove(50, -50);
+                      },
+                      onReleased: () {
+                        ref.read(wifiConnectionProvider.notifier).sendStop();
                       },
                     ),
                   ],
@@ -1252,9 +1259,13 @@ class _ArrowControls extends ConsumerWidget {
                   enabled: enabled,
                   color: _kBad,
                   onPressed: () {
+                    // Назад: M,-50,-50
                     ref
-                        .read(btConnectionProvider.notifier)
-                        .sendArrowCommand('B');
+                        .read(wifiConnectionProvider.notifier)
+                        .sendMove(-50, -50);
+                  },
+                  onReleased: () {
+                    ref.read(wifiConnectionProvider.notifier).sendStop();
                   },
                 ),
               ],
@@ -1272,6 +1283,7 @@ class _ArrowButton extends StatelessWidget {
   final bool enabled;
   final Color color;
   final VoidCallback onPressed;
+  final VoidCallback? onReleased;
 
   const _ArrowButton({
     required this.size,
@@ -1279,13 +1291,15 @@ class _ArrowButton extends StatelessWidget {
     required this.enabled,
     required this.color,
     required this.onPressed,
+    this.onReleased,
   });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
-      onTap: enabled ? onPressed : null,
+    return GestureDetector(
+      onTapDown: enabled ? (_) => onPressed() : null,
+      onTapUp: enabled && onReleased != null ? (_) => onReleased!() : null,
+      onTapCancel: enabled && onReleased != null ? () => onReleased!() : null,
       child: Container(
         width: size,
         height: size,
@@ -1375,13 +1389,13 @@ class _TopBar extends StatelessWidget {
 
 class _StatusPanel extends StatelessWidget {
   final double uiScale;
-  final BtConnectionState bt;
+  final WifiConnectionState wifi;
   final int batteryPercent;
   final VoidCallback onToggle;
 
   const _StatusPanel({
     required this.uiScale,
-    required this.bt,
+    required this.wifi,
     required this.batteryPercent,
     required this.onToggle,
   });
@@ -1389,7 +1403,18 @@ class _StatusPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     double u(double v) => v * uiScale;
-    final accent = bt.isConnected ? _kGood : _kBad;
+    final accent = wifi.isConnected ? _kGood : _kBad;
+
+    String statusText;
+    if (wifi.isBusy || wifi.isConnecting) {
+      statusText = 'Подключение…';
+    } else if (wifi.isConnected) {
+      statusText = 'Подключено';
+    } else if (!wifi.isWifiOk) {
+      statusText = 'Подключитесь к Wi-Fi робота';
+    } else {
+      statusText = 'Не подключено';
+    }
 
     return _GlassCard(
       borderColor: accent.withOpacity(0.32),
@@ -1406,18 +1431,16 @@ class _StatusPanel extends StatelessWidget {
               child: Row(
                 children: [
                   Icon(
-                    bt.isConnected
-                        ? Icons.bluetooth_connected_rounded
-                        : Icons.bluetooth_disabled_rounded,
+                    wifi.isConnected
+                        ? Icons.wifi_rounded
+                        : Icons.wifi_off_rounded,
                     color: accent,
                     size: u(18).clamp(16.0, 18.0),
                   ),
                   SizedBox(width: u(8)),
                   Expanded(
                     child: Text(
-                      bt.isBusy
-                          ? 'Подключение…'
-                          : (bt.isConnected ? 'Подключено' : 'Не подключено'),
+                      statusText,
                       style: TextStyle(
                         fontWeight: FontWeight.w900,
                         fontSize: u(11.5).clamp(10.5, 11.5),
@@ -1434,8 +1457,8 @@ class _StatusPanel extends StatelessWidget {
             _ConnectBtn(
               uiScale: uiScale,
               accent: accent,
-              busy: bt.isBusy,
-              isConnected: bt.isConnected,
+              busy: wifi.isBusy || wifi.isConnecting,
+              isConnected: wifi.isConnected,
               onTap: onToggle,
             ),
           ],
@@ -2710,9 +2733,10 @@ class _PremiumBG extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const bg0 = Color(0xFF070910);
-    const bg1 = Color(0xFF0B1426);
-    const bg2 = Color(0xFF081633);
+    // Черно-белый фон
+    const bg0 = Color(0xFF000000);
+    const bg1 = Color(0xFF1A1A1A);
+    const bg2 = Color(0xFF2A2A2A);
 
     final tint = isConnected ? _kGood : _kBad;
 
@@ -2730,9 +2754,28 @@ class _PremiumBG extends StatelessWidget {
             ),
           ),
         ),
+        // Светлый градиент сверху
         Positioned.fill(
           child: Opacity(
-            opacity: 0.22,
+            opacity: 0.18,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.white.withOpacity(0.35),
+                    Colors.transparent,
+                  ],
+                  stops: const [0.0, 0.30],
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: Opacity(
+            opacity: 0.18,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: RadialGradient(

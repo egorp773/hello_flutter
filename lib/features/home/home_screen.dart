@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import 'package:hello_flutter/core/bt_connection.dart';
+import 'package:hello_flutter/core/wifi_connection.dart';
 
 /// ============================================================
 /// Core picker
@@ -90,10 +90,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
-    final bt = ref.watch(btConnectionProvider);
+    final wifi = ref.watch(wifiConnectionProvider);
     final core = ref.watch(controlCoreProvider);
 
-    ref.listen<BtConnectionState>(btConnectionProvider, (prev, next) {
+    ref.listen<WifiConnectionState>(wifiConnectionProvider, (prev, next) {
       if (prev == null) return;
       if (prev.isConnected != next.isConnected && !next.isConnecting) {
         _flareCtrl.forward(from: 0);
@@ -101,31 +101,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       }
     });
 
-    const neonBlue = Color(0xFF3DE7FF);
-    const goodGreen = Color(0xFF38F6A7);
-    const badRed = Color(0xFFFF4D6D);
+    // Черно-белая цветовая схема
+    const accentWhite = Colors.white;
+    const accentGray = Color(0xFF9E9E9E);
 
-    final accent = bt.isConnected ? goodGreen : badRed;
+    final accent = wifi.isConnected ? accentWhite : accentGray;
 
     String statusTitle;
     String statusSubtitle;
 
-    if (!bt.isSupported) {
-      statusTitle = 'Bluetooth LE Недоступен';
-      statusSubtitle = 'Устройство не поддерживает BLE.';
-    } else if (!bt.isBluetoothOn) {
-      statusTitle = 'Bluetooth Выключен';
-      statusSubtitle = 'Включите Bluetooth и нажмите «Подключить».';
-    } else if (bt.isConnected) {
+    if (!wifi.isWifiOk) {
+      statusTitle = 'Wi-Fi Не Подключён';
+      statusSubtitle = 'Подключитесь к Wi-Fi робота.';
+    } else if (wifi.isConnected) {
       statusTitle = 'Готов К Работе';
       statusSubtitle =
-          'Подключено к ${bt.deviceName}. Можно управлять роботом.';
-    } else if (bt.isScanning) {
-      statusTitle = 'Поиск Устройств…';
-      statusSubtitle = 'Сканируем доступные BLE устройства рядом.';
+          'Подключено к ${wifi.deviceName}. Можно управлять роботом.';
+    } else if (wifi.isConnecting || wifi.isBusy) {
+      statusTitle = 'Подключение…';
+      statusSubtitle = 'Подключаемся к роботу по Wi-Fi.';
     } else {
       statusTitle = 'Ожидает Подключения';
-      statusSubtitle = 'Подключите робота по Bluetooth, затем выберите режим.';
+      statusSubtitle = 'Нажмите «Подключить» для соединения с роботом.';
     }
 
     return Scaffold(
@@ -152,14 +149,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           return Stack(
             children: [
               Positioned.fill(
-                child: _PremiumStaticBackground(isConnected: bt.isConnected),
+                child: _PremiumStaticBackground(isConnected: wifi.isConnected),
               ),
               Positioned.fill(
                 child: IgnorePointer(
                   child: AnimatedBuilder(
                     animation: _flareCtrl,
                     builder: (_, __) => _ConnectionFlareOverlay(
-                      isConnected: bt.isConnected,
+                      isConnected: wifi.isConnected,
                       intensity: _flareIntensity.value,
                     ),
                   ),
@@ -200,10 +197,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                     ),
                                   ),
                                   SizedBox(width: s(8).clamp(6.0, 8.0)),
-                                  _BluetoothStatusIndicator(
-                                    isConnected: bt.isConnected,
-                                    isBusy: bt.isBusy,
-                                    deviceName: bt.deviceName,
+                                  _WifiStatusIndicator(
+                                    isConnected: wifi.isConnected,
+                                    isBusy: wifi.isBusy || wifi.isConnecting,
+                                    deviceName: wifi.deviceName,
                                     size: s(14).clamp(12.0, 14.0),
                                   ),
                                 ],
@@ -216,7 +213,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             glyphSize: topIconGlyph,
                             icon: Icons.map_rounded,
                             tooltip: 'Карты',
-                            iconColor: neonBlue,
+                            iconColor: accentWhite,
                             onTap: () => context.go('/maps'),
                           ),
                           SizedBox(width: s(10)),
@@ -225,7 +222,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             glyphSize: topIconGlyph,
                             icon: Icons.tune_rounded,
                             tooltip: 'Настройки',
-                            iconColor: neonBlue,
+                            iconColor: accentWhite,
                             onTap: () {
                               showModalBottomSheet(
                                 context: context,
@@ -250,8 +247,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             children: [
                               _BtStatusOrb(
                                 size: s(44).clamp(36.0, 44.0),
-                                isConnected: bt.isConnected,
-                                isBusy: bt.isBusy,
+                                isConnected: wifi.isConnected,
+                                isBusy: wifi.isBusy || wifi.isConnecting,
                               ),
                               SizedBox(width: s(12)),
                               Expanded(
@@ -285,37 +282,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                             _BigConnectButton(
                                               width: btnW,
                                               height: s(52).clamp(42.0, 52.0),
-                                              isConnected: bt.isConnected,
-                                              isBusy: bt.isBusy,
+                                              isConnected: wifi.isConnected,
+                                              isBusy: wifi.isBusy ||
+                                                  wifi.isConnecting,
                                               color: accent,
                                               minText: s(10).clamp(9.0, 10.0),
                                               maxText: s(15).clamp(12.0, 15.0),
                                               onTap: () async {
                                                 final ctrl = ref.read(
-                                                    btConnectionProvider
+                                                    wifiConnectionProvider
                                                         .notifier);
 
-                                                if (bt.isConnected) {
+                                                if (wifi.isConnected) {
                                                   await ctrl.disconnect();
                                                   return;
                                                 }
 
-                                                final picked =
-                                                    await showModalBottomSheet<
-                                                        BtDeviceInfo>(
-                                                  context: context,
-                                                  backgroundColor:
-                                                      Colors.transparent,
-                                                  barrierColor: Colors.black
-                                                      .withOpacity(0.55),
-                                                  isScrollControlled: true,
-                                                  builder: (_) =>
-                                                      const _BtDevicePickerSheet(),
-                                                );
-
-                                                if (picked != null) {
-                                                  await ctrl.connectTo(picked);
-                                                }
+                                                await ctrl.connect();
                                               },
                                             ),
                                           ],
@@ -324,9 +307,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                     ),
                                     SizedBox(height: s(8).clamp(5.0, 8.0)),
                                     AdaptiveText(
-                                      bt.error == null
+                                      wifi.error == null
                                           ? statusSubtitle
-                                          : (bt.error!),
+                                          : (wifi.error!),
                                       maxLines: 3,
                                       minFontSize: s(10.0).clamp(9.0, 10.0),
                                       maxFontSize: s(13.0).clamp(11.0, 13.0),
@@ -361,10 +344,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                     return Transform.scale(
                                       scale: _robotScale.value,
                                       child: _RobotStable(
-                                        neon: neonBlue,
+                                        neon: accentWhite,
                                         boost: _robotGlowBoost.value,
-                                        boostColor:
-                                            bt.isConnected ? goodGreen : badRed,
+                                        boostColor: wifi.isConnected
+                                            ? accentWhite
+                                            : accentGray,
                                       ),
                                     );
                                   },
@@ -386,8 +370,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               subtitle:
                                   'Джойстик + запись маршрута (реальные команды)',
                               icon: Icons.sports_esports_rounded,
-                              border: neonBlue.withOpacity(0.22),
-                              glow: neonBlue.withOpacity(0.12),
+                              border: accentWhite.withOpacity(0.22),
+                              glow: accentWhite.withOpacity(0.12),
                               onTap: () => context.go('/manual'),
                             ),
                           ),
@@ -398,8 +382,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               title: 'Автоматический Режим',
                               subtitle: 'Пока заглушка — позже добавим',
                               icon: Icons.route_rounded,
-                              border: neonBlue.withOpacity(0.22),
-                              glow: neonBlue.withOpacity(0.12),
+                              border: accentWhite.withOpacity(0.22),
+                              glow: accentWhite.withOpacity(0.12),
                               onTap: () => context.go('/auto'),
                             ),
                           ),
@@ -412,7 +396,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                         child: _CapsuleGlassButton(
                           uiScale: uiScale,
                           text: core,
-                          border: neonBlue.withOpacity(0.22),
+                          border: accentWhite.withOpacity(0.22),
                           onTap: () => _showCorePicker(context),
                         ),
                       ),
@@ -442,260 +426,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           },
         );
       },
-    );
-  }
-}
-
-/// ============================================================
-/// Device picker sheet (в вашем стиле)
-/// ============================================================
-class _BtDevicePickerSheet extends ConsumerStatefulWidget {
-  const _BtDevicePickerSheet();
-
-  @override
-  ConsumerState<_BtDevicePickerSheet> createState() =>
-      _BtDevicePickerSheetState();
-}
-
-class _BtDevicePickerSheetState extends ConsumerState<_BtDevicePickerSheet> {
-  @override
-  void initState() {
-    super.initState();
-    Future.microtask(() => ref.read(btConnectionProvider.notifier).startScan());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bt = ref.watch(btConnectionProvider);
-    const neon = Color(0xFF3DE7FF);
-
-    final bottom = MediaQuery.of(context).viewInsets.bottom;
-
-    return Padding(
-      padding: EdgeInsets.fromLTRB(14, 0, 14, 14 + bottom),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(26),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-          child: Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(26),
-              border: Border.all(color: neon.withOpacity(0.22)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 48,
-                  height: 5,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(999),
-                    color: Colors.white.withOpacity(0.18),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    const Icon(Icons.bluetooth_searching_rounded, color: neon),
-                    const SizedBox(width: 10),
-                    const Expanded(
-                      child: Text(
-                        'Выбор Устройства',
-                        style: TextStyle(fontWeight: FontWeight.w900),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                if (!bt.isBluetoothOn) ...[
-                  Text(
-                    'Bluetooth выключен. Включите его и нажмите «Сканировать».',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.72),
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: () => ref
-                              .read(btConnectionProvider.notifier)
-                              .turnOnAdapterAndroid(),
-                          child: const Text('Включить'),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: () => ref
-                              .read(btConnectionProvider.notifier)
-                              .startScan(),
-                          child: const Text('Сканировать'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                ] else ...[
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: () => ref
-                              .read(btConnectionProvider.notifier)
-                              .startScan(),
-                          child: Text(
-                              bt.isScanning ? 'Сканируем…' : 'Сканировать'),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: () => ref
-                              .read(btConnectionProvider.notifier)
-                              .stopScan(),
-                          child: const Text('Стоп'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                ],
-                if (bt.error != null) ...[
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      bt.error!,
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.78),
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                ],
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 340),
-                  child: bt.devices.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 18),
-                          child: Text(
-                            bt.isScanning
-                                ? 'Идёт поиск устройств…'
-                                : 'Устройств не найдено. Нажмите «Сканировать».',
-                            style: TextStyle(
-                              color: Colors.white.withOpacity(0.70),
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                        )
-                      : ListView.separated(
-                          shrinkWrap: true,
-                          itemCount: bt.devices.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 10),
-                          itemBuilder: (_, i) {
-                            final d = bt.devices[i];
-                            return InkWell(
-                              borderRadius: BorderRadius.circular(18),
-                              onTap: () => Navigator.pop(context, d),
-                              child: Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.05),
-                                  borderRadius: BorderRadius.circular(18),
-                                  border:
-                                      Border.all(color: neon.withOpacity(0.18)),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      width: 44,
-                                      height: 44,
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(16),
-                                        color: neon.withOpacity(0.12),
-                                        border: Border.all(
-                                            color: neon.withOpacity(0.20)),
-                                      ),
-                                      child: const Icon(
-                                        Icons.bluetooth_rounded,
-                                        color: neon,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            d.name,
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w900,
-                                            ),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            d.id,
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                              color: Colors.white
-                                                  .withOpacity(0.70),
-                                            ),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.end,
-                                      children: [
-                                        Text(
-                                          '${d.rssi} dBm',
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.w900,
-                                            color:
-                                                Colors.white.withOpacity(0.88),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Icon(
-                                          Icons.wifi_tethering_rounded,
-                                          size: 18,
-                                          color: Colors.white.withOpacity(
-                                            (d.rssi > -60)
-                                                ? 0.9
-                                                : (d.rssi > -80 ? 0.65 : 0.35),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -957,13 +687,14 @@ class _PremiumStaticBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const bg0 = Color(0xFF070910);
-    const bg1 = Color(0xFF0B1426);
-    const bg2 = Color(0xFF081633);
+    // Черно-белый фон
+    const bg0 = Color(0xFF000000);
+    const bg1 = Color(0xFF1A1A1A);
+    const bg2 = Color(0xFF2A2A2A);
 
-    const tintRed = Color(0xFFFF4D6D);
-    const tintGreen = Color(0xFF38F6A7);
-    final tint = isConnected ? tintGreen : tintRed;
+    const tintWhite = Colors.white;
+    const tintGray = Color(0xFF6E6E6E);
+    final tint = isConnected ? tintWhite : tintGray;
 
     return Stack(
       children: [
@@ -975,6 +706,25 @@ class _PremiumStaticBackground extends StatelessWidget {
                 end: Alignment(1.0, 1.0),
                 colors: [bg0, bg1, bg2],
                 stops: [0.0, 0.55, 1.0],
+              ),
+            ),
+          ),
+        ),
+        // Светлый градиент сверху
+        Positioned.fill(
+          child: Opacity(
+            opacity: 0.18,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.white.withOpacity(0.35),
+                    Colors.transparent,
+                  ],
+                  stops: const [0.0, 0.30],
+                ),
               ),
             ),
           ),
@@ -996,13 +746,13 @@ class _PremiumStaticBackground extends StatelessWidget {
         ),
         Positioned.fill(
           child: Opacity(
-            opacity: 0.36,
+            opacity: 0.20,
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: RadialGradient(
                   center: const Alignment(-0.55, -0.65),
                   radius: 1.10,
-                  colors: [const Color(0xFF3DE7FF), Colors.transparent],
+                  colors: [Colors.white.withOpacity(0.15), Colors.transparent],
                   stops: const [0.0, 1.0],
                 ),
               ),
@@ -1042,9 +792,9 @@ class _ConnectionFlareOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     if (intensity <= 0.001) return const SizedBox.shrink();
 
-    const green = Color(0xFF38F6A7);
-    const red = Color(0xFFFF4D6D);
-    final c = isConnected ? green : red;
+    const white = Colors.white;
+    const gray = Color(0xFF6E6E6E);
+    final c = isConnected ? white : gray;
 
     final op = (0.60 * intensity).clamp(0.0, 0.60);
 
@@ -1129,8 +879,8 @@ class _BtStatusOrb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const good = Color(0xFF38F6A7);
-    const bad = Color(0xFFFF4D6D);
+    const good = Colors.white;
+    const bad = Color(0xFF6E6E6E);
     final c = isConnected ? good : bad;
 
     return Stack(
@@ -1173,8 +923,8 @@ class _BtStatusOrb extends StatelessWidget {
                       )
                     : Icon(
                         isConnected
-                            ? Icons.bluetooth_connected_rounded
-                            : Icons.bluetooth_disabled_rounded,
+                            ? Icons.wifi_rounded
+                            : Icons.wifi_off_rounded,
                         size: size * 0.45,
                         color: c,
                       ),
@@ -1214,6 +964,7 @@ class _RobotStable extends StatelessWidget {
       child: Stack(
         alignment: Alignment.center,
         children: [
+          // Glow эффект (фон)
           SizedBox(
             width: glowSize,
             height: glowSize,
@@ -1235,6 +986,110 @@ class _RobotStable extends StatelessWidget {
               ),
             ),
           ),
+
+          // Ground plane - пятно пола (эллипс с радиальным градиентом)
+          Positioned(
+            bottom: 0,
+            child: Container(
+              width: 280,
+              height: 80,
+              decoration: BoxDecoration(
+                shape: BoxShape.rectangle,
+                borderRadius: BorderRadius.circular(140),
+                gradient: RadialGradient(
+                  center: Alignment.topCenter,
+                  radius: 1.2,
+                  colors: [
+                    Colors.black.withOpacity(0.28),
+                    Colors.black.withOpacity(0.12),
+                    Colors.transparent,
+                  ],
+                  stops: const [0.0, 0.5, 1.0],
+                ),
+              ),
+            ),
+          ),
+
+          // Мягкая падающая тень (широкая, размытая)
+          Positioned(
+            bottom: 8,
+            child: ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 8),
+              child: Container(
+                width: 200,
+                height: 50,
+                decoration: BoxDecoration(
+                  shape: BoxShape.rectangle,
+                  borderRadius: BorderRadius.circular(100),
+                  color: Colors.black.withOpacity(0.35),
+                ),
+              ),
+            ),
+          ),
+
+          // Контактная тень (темная, резкая прямо под роботом)
+          Positioned(
+            bottom: 12,
+            child: ImageFiltered(
+              imageFilter: ImageFilter.blur(sigmaX: 8, sigmaY: 4),
+              child: Container(
+                width: 140,
+                height: 24,
+                decoration: BoxDecoration(
+                  shape: BoxShape.rectangle,
+                  borderRadius: BorderRadius.circular(70),
+                  color: Colors.black.withOpacity(0.55),
+                ),
+              ),
+            ),
+          ),
+
+          // Отражение робота (опционально, очень слабое)
+          Positioned(
+            bottom: 0,
+            child: ClipRect(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                heightFactor: 0.35,
+                child: Transform(
+                  alignment: Alignment.bottomCenter,
+                  transform: Matrix4.identity()..scale(1.0, -1.0),
+                  child: ShaderMask(
+                    shaderCallback: (bounds) {
+                      return LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.white.withOpacity(0.08),
+                          Colors.white.withOpacity(0.0),
+                        ],
+                        stops: const [0.0, 1.0],
+                      ).createShader(bounds);
+                    },
+                    blendMode: BlendMode.dstIn,
+                    child: ImageFiltered(
+                      imageFilter: ImageFilter.blur(sigmaX: 2, sigmaY: 1),
+                      child: Opacity(
+                        opacity: 0.08,
+                        child: SizedBox(
+                          height: robotHeight * 0.35,
+                          child: Image.asset(
+                            'assets/images/robot.png',
+                            fit: BoxFit.contain,
+                            filterQuality: FilterQuality.high,
+                            errorBuilder: (_, __, ___) =>
+                                const SizedBox.shrink(),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // Робот (поверх всех эффектов)
           SizedBox(
             height: robotHeight,
             child: Image.asset(
@@ -1272,11 +1127,11 @@ class _BrandMark extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF3DE7FF), Color(0xFF6D5BFF)],
+          colors: [Colors.white, Color(0xFF9E9E9E)],
         ),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF3DE7FF).withOpacity(0.30),
+            color: Colors.white.withOpacity(0.20),
             blurRadius: 14,
             spreadRadius: 1,
           ),
@@ -1351,7 +1206,6 @@ class _NeonIconBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const neon = Color(0xFF3DE7FF);
     return Container(
       width: size,
       height: size,
@@ -1361,14 +1215,14 @@ class _NeonIconBadge extends StatelessWidget {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            neon.withOpacity(0.30),
-            const Color(0xFF6D5BFF).withOpacity(0.12),
+            Colors.white.withOpacity(0.25),
+            Colors.white.withOpacity(0.08),
           ],
         ),
-        border: Border.all(color: Colors.white.withOpacity(0.10)),
+        border: Border.all(color: Colors.white.withOpacity(0.20)),
         boxShadow: [
           BoxShadow(
-            color: neon.withOpacity(0.16),
+            color: Colors.white.withOpacity(0.10),
             blurRadius: 16,
             spreadRadius: 1,
           ),
@@ -1453,7 +1307,7 @@ class _CorePickerSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const neon = Color(0xFF3DE7FF);
+    const accent = Colors.white;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
@@ -1466,7 +1320,7 @@ class _CorePickerSheet extends StatelessWidget {
             decoration: BoxDecoration(
               color: Colors.white.withOpacity(0.06),
               borderRadius: BorderRadius.circular(26),
-              border: Border.all(color: neon.withOpacity(0.22)),
+              border: Border.all(color: accent.withOpacity(0.22)),
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1482,7 +1336,7 @@ class _CorePickerSheet extends StatelessWidget {
                 const SizedBox(height: 14),
                 Row(
                   children: [
-                    const Icon(Icons.layers_rounded, color: neon),
+                    const Icon(Icons.layers_rounded, color: accent),
                     const SizedBox(width: 10),
                     const Expanded(
                       child: Text(
@@ -1530,7 +1384,7 @@ class _CoreOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const neon = Color(0xFF3DE7FF);
+    const accent = Colors.white;
 
     return InkWell(
       borderRadius: BorderRadius.circular(18),
@@ -1541,12 +1395,13 @@ class _CoreOption extends StatelessWidget {
           borderRadius: BorderRadius.circular(18),
           color: Colors.white.withOpacity(0.05),
           border: Border.all(
-            color: selected ? neon.withOpacity(0.35) : neon.withOpacity(0.14),
+            color:
+                selected ? accent.withOpacity(0.35) : accent.withOpacity(0.14),
           ),
           boxShadow: selected
               ? [
                   BoxShadow(
-                    color: neon.withOpacity(0.14),
+                    color: accent.withOpacity(0.14),
                     blurRadius: 18,
                     spreadRadius: 1,
                   )
@@ -1560,13 +1415,13 @@ class _CoreOption extends StatelessWidget {
               height: 42,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(16),
-                color: neon.withOpacity(selected ? 0.14 : 0.10),
-                border:
-                    Border.all(color: neon.withOpacity(selected ? 0.28 : 0.18)),
+                color: accent.withOpacity(selected ? 0.14 : 0.10),
+                border: Border.all(
+                    color: accent.withOpacity(selected ? 0.28 : 0.18)),
               ),
               child: Icon(
                 selected ? Icons.check_circle_rounded : Icons.circle_outlined,
-                color: neon,
+                color: accent,
               ),
             ),
             const SizedBox(width: 12),
@@ -1588,7 +1443,7 @@ class _QuickSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const neon = Color(0xFF3DE7FF);
+    const accent = Colors.white;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
@@ -1601,7 +1456,7 @@ class _QuickSheet extends StatelessWidget {
             decoration: BoxDecoration(
               color: Colors.white.withOpacity(0.06),
               borderRadius: BorderRadius.circular(26),
-              border: Border.all(color: neon.withOpacity(0.22)),
+              border: Border.all(color: accent.withOpacity(0.22)),
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1617,7 +1472,7 @@ class _QuickSheet extends StatelessWidget {
                 const SizedBox(height: 14),
                 Row(
                   children: [
-                    const Icon(Icons.tune_rounded, color: neon),
+                    const Icon(Icons.tune_rounded, color: accent),
                     const SizedBox(width: 10),
                     const Expanded(
                       child: Text(
@@ -1654,15 +1509,15 @@ class _QuickSheet extends StatelessWidget {
 }
 
 /// ============================================================
-/// Bluetooth Status Indicator
+/// Wi-Fi Status Indicator
 /// ============================================================
-class _BluetoothStatusIndicator extends StatelessWidget {
+class _WifiStatusIndicator extends StatelessWidget {
   final bool isConnected;
   final bool isBusy;
   final String? deviceName;
   final double size;
 
-  const _BluetoothStatusIndicator({
+  const _WifiStatusIndicator({
     required this.isConnected,
     required this.isBusy,
     this.deviceName,
@@ -1671,21 +1526,19 @@ class _BluetoothStatusIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const goodGreen = Color(0xFF38F6A7);
-    const badRed = Color(0xFFFF4D6D);
-    const neonBlue = Color(0xFF3DE7FF);
+    const goodWhite = Colors.white;
+    const badGray = Color(0xFF6E6E6E);
+    const busyWhite = Colors.white;
 
-    final color = isConnected ? goodGreen : (isBusy ? neonBlue : badRed);
+    final color = isConnected ? goodWhite : (isBusy ? busyWhite : badGray);
     final icon = isConnected
-        ? Icons.bluetooth_connected_rounded
-        : (isBusy
-            ? Icons.bluetooth_searching_rounded
-            : Icons.bluetooth_disabled_rounded);
+        ? Icons.wifi_rounded
+        : (isBusy ? Icons.wifi_find_rounded : Icons.wifi_off_rounded);
 
     return Tooltip(
       message: isConnected
           ? (deviceName != null ? 'Подключено: $deviceName' : 'Подключено')
-          : (isBusy ? 'Поиск устройств...' : 'Не подключено'),
+          : (isBusy ? 'Подключение...' : 'Не подключено'),
       child: Container(
         padding: EdgeInsets.symmetric(
           horizontal: size * 0.4,

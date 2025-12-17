@@ -197,20 +197,25 @@ class BtConnectionController extends StateNotifier<BtConnectionState> {
       );
     });
 
-    // результаты скана
+    // результаты скана - собираем ВСЕ устройства без фильтров
     _scanSub = FlutterBluePlus.onScanResults.listen((results) {
       final map = <String, BtDeviceInfo>{};
+      
       for (final r in results) {
         final dev = r.device;
+        // Используем remoteId как уникальный ключ (НЕ MAC адрес)
         final id = dev.remoteId.str;
 
-        // имя: advName приоритетнее, иначе platformName
-        final adv = dev.advName.trim();
+        // Имя: platformName приоритетнее (на iOS часто единственное доступное)
+        // Если оба пустые - показываем "Без имени"
         final platform = dev.platformName.trim();
-        final name = adv.isNotEmpty
-            ? adv
-            : (platform.isNotEmpty ? platform : 'Без имени');
+        final adv = dev.advName.trim();
+        final name = platform.isNotEmpty
+            ? platform
+            : (adv.isNotEmpty ? adv : 'Без имени');
 
+        // Добавляем ВСЕ устройства, даже без имени
+        // Обновляем по remoteId (если устройство уже есть - обновляем RSSI)
         map[id] = BtDeviceInfo(
           device: dev,
           id: id,
@@ -220,6 +225,7 @@ class BtConnectionController extends StateNotifier<BtConnectionState> {
         );
       }
 
+      // Сортируем по RSSI (сильнее сигнал - выше в списке)
       final list = map.values.toList()
         ..sort((a, b) => b.rssi.compareTo(a.rssi));
 
@@ -367,7 +373,7 @@ class BtConnectionController extends StateNotifier<BtConnectionState> {
 
   // --- scan ---
   Future<void> startScan(
-      {Duration timeout = const Duration(seconds: 6)}) async {
+      {Duration timeout = const Duration(seconds: 5)}) async {
     state = state.copyWith(error: null);
 
     if (!state.isSupported) {
@@ -384,11 +390,19 @@ class BtConnectionController extends StateNotifier<BtConnectionState> {
       return;
     }
 
+    // Останавливаем предыдущий скан, если он идет
+    await stopScan();
+
     // очищаем список перед новым сканом
     state = state.copyWith(devices: []);
 
     try {
-      await FlutterBluePlus.startScan(timeout: timeout);
+      // Сканируем ВСЕ устройства без фильтров по сервисам
+      await FlutterBluePlus.startScan(
+        timeout: timeout,
+        // НЕ указываем withServices - сканируем все устройства
+        // НЕ фильтруем по имени - на iOS имя часто пустое
+      );
     } catch (e) {
       state = state.copyWith(error: 'Скан не запустился: $e');
     }
@@ -460,13 +474,56 @@ class BtConnectionController extends StateNotifier<BtConnectionState> {
       // Дополнительная проверка состояния соединения периодически
       _startConnectionMonitor();
 
-      // services
+      // services - проверяем наличие NUS ПОСЛЕ подключения
       await _connectedDevice!.discoverServices();
       final services = _connectedDevice!.servicesList;
 
       final pair = _pickUartChars(services);
       _writeChar = pair.$1;
       _notifyChar = pair.$2;
+
+      // Проверяем наличие NUS сервиса и нужных характеристик
+      bool hasNusService = false;
+      bool hasNusWrite = false;
+      bool hasNusNotify = false;
+      
+      for (final s in services) {
+        if (s.uuid == _nusService) {
+          hasNusService = true;
+          for (final c in s.characteristics) {
+            if (c.uuid == _nusWrite) {
+              hasNusWrite = true;
+            }
+            if (c.uuid == _nusNotify) {
+              hasNusNotify = true;
+            }
+          }
+          break;
+        }
+      }
+
+      // Если NUS сервис не найден или нет нужных характеристик - отключаемся
+      if (!hasNusService || !hasNusWrite || !hasNusNotify || _writeChar == null || _notifyChar == null) {
+        await _connectedDevice!.disconnect();
+        _connectedDevice = null;
+        _writeChar = null;
+        _notifyChar = null;
+        
+        String errorMsg = 'Устройство подключилось, но NUS сервис не найден. ';
+        if (hasNusService && (!hasNusWrite || !hasNusNotify)) {
+          errorMsg = 'Устройство подключилось, но отсутствуют нужные характеристики NUS. ';
+        }
+        errorMsg += 'Убедитесь, что устройство поддерживает Nordic UART Service (UUID: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E).';
+        
+        state = state.copyWith(
+          isConnected: false,
+          isConnecting: false,
+          isBusy: state.isScanning,
+          error: errorMsg,
+        );
+        _appendLog('✗ NUS SERVICE NOT FOUND');
+        return;
+      }
 
       if (_notifyChar != null) {
         await _notifyChar!.setNotifyValue(true);

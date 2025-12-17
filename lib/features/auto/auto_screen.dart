@@ -3,8 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../bt/bt_device_sheet.dart';
-import '../../core/bt_connection.dart';
+import '../../core/wifi_connection.dart';
 
 class AutoScreen extends ConsumerStatefulWidget {
   const AutoScreen({super.key});
@@ -14,23 +13,17 @@ class AutoScreen extends ConsumerStatefulWidget {
 }
 
 class _AutoScreenState extends ConsumerState<AutoScreen> {
-  Future<void> _toggleBtConnection() async {
-    final bt = ref.read(btConnectionProvider);
-    final ctrl = ref.read(btConnectionProvider.notifier);
+  Future<void> _toggleWifiConnection() async {
+    final wifi = ref.read(wifiConnectionProvider);
+    final ctrl = ref.read(wifiConnectionProvider.notifier);
 
-    if (bt.isConnected) {
+    if (wifi.isConnected) {
       await ctrl.disconnect();
       return;
     }
 
-    // Открываем стандартный лист выбора устройств
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withOpacity(0.55),
-      builder: (_) => const BtDevicePickerSheet(),
-    );
+    // Подключаемся к WebSocket
+    await ctrl.connect();
   }
 
   @override
@@ -38,9 +31,9 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
     const neon = Color(0xFF3DE7FF);
     const goodGreen = Color(0xFF38F6A7);
     const badRed = Color(0xFFFF4D6D);
-    
-    final bt = ref.watch(btConnectionProvider);
-    final accent = bt.isConnected ? goodGreen : badRed;
+
+    final wifi = ref.watch(wifiConnectionProvider);
+    final accent = wifi.isConnected ? goodGreen : badRed;
 
     return Scaffold(
       body: Stack(
@@ -102,12 +95,13 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: accent.withOpacity(0.12),
-                                border: Border.all(color: accent.withOpacity(0.35)),
+                                border:
+                                    Border.all(color: accent.withOpacity(0.35)),
                               ),
                               child: Icon(
-                                bt.isConnected
-                                    ? Icons.bluetooth_connected_rounded
-                                    : Icons.bluetooth_disabled_rounded,
+                                wifi.isConnected
+                                    ? Icons.wifi_rounded
+                                    : Icons.wifi_off_rounded,
                                 color: accent,
                                 size: 24,
                               ),
@@ -118,9 +112,11 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    bt.isBusy
+                                    wifi.isBusy || wifi.isConnecting
                                         ? 'Подключение…'
-                                        : (bt.isConnected ? 'Подключено' : 'Не подключено'),
+                                        : (wifi.isConnected
+                                            ? 'Подключено'
+                                            : 'Не подключено'),
                                     style: const TextStyle(
                                       fontWeight: FontWeight.w900,
                                       fontSize: 15,
@@ -128,9 +124,11 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    bt.isConnected
-                                        ? bt.deviceName
-                                        : 'Подключите робота для автоматического режима',
+                                    wifi.isConnected
+                                        ? wifi.deviceName
+                                        : (wifi.isWifiOk
+                                            ? 'Подключите робота для автоматического режима'
+                                            : 'Подключитесь к Wi-Fi робота'),
                                     style: TextStyle(
                                       fontWeight: FontWeight.w700,
                                       fontSize: 12,
@@ -145,11 +143,14 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                             const SizedBox(width: 10),
                             InkWell(
                               borderRadius: BorderRadius.circular(16),
-                              onTap: bt.isBusy ? null : _toggleBtConnection,
+                              onTap: (wifi.isBusy || wifi.isConnecting)
+                                  ? null
+                                  : _toggleWifiConnection,
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(16),
                                 child: BackdropFilter(
-                                  filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                                  filter:
+                                      ImageFilter.blur(sigmaX: 14, sigmaY: 14),
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(
                                       horizontal: 14,
@@ -165,9 +166,10 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                         ],
                                       ),
                                       borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(color: accent.withOpacity(0.45)),
+                                      border: Border.all(
+                                          color: accent.withOpacity(0.45)),
                                     ),
-                                    child: bt.isBusy
+                                    child: (wifi.isBusy || wifi.isConnecting)
                                         ? const SizedBox(
                                             width: 16,
                                             height: 16,
@@ -176,7 +178,9 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                             ),
                                           )
                                         : Text(
-                                            bt.isConnected ? 'Отключить' : 'Подключить',
+                                            wifi.isConnected
+                                                ? 'Отключить'
+                                                : 'Подключить',
                                             style: const TextStyle(
                                               fontWeight: FontWeight.w900,
                                               fontSize: 12,
