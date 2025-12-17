@@ -25,7 +25,7 @@ jobs:
       - name: Build iOS (release, no codesign)
         run: flutter build ios --release --no-codesign
 
-      - name: Debug: list build outputs
+      - name: Debug - list build outputs
         run: |
           echo "=== build/ios ==="
           ls -la build/ios || true
