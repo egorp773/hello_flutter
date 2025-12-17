@@ -17,9 +17,11 @@ dependencies:
   go_router: ^14.2.0
   # State management
   flutter_riverpod: ^2.5.1
-  # Bluetooth (BLE, подходит для iPhone)
-  flutter_blue_plus: ^2.0.2
-  # Permissions (Android)
+  # WebSocket для Wi-Fi управления
+  web_socket_channel: ^3.0.0
+  # Wi-Fi SSID проверка
+  network_info_plus: ^6.0.0
+  # Permissions (Android для доступа к SSID)
   permission_handler: ^12.0.1
   device_preview: ^1.3.1
   # Local storage
