@@ -26,8 +26,19 @@ jobs:
       - name: Build IPA (no codesign)
         run: flutter build ipa --release --no-codesign
 
-      - name: Upload IPA
+      - name: Find and Upload IPA or App
+        run: |
+          echo "Listing build/ios directory..."
+          ls -R build/ios || true
+        continue-on-error: true
+
+      - name: Upload app folder
         uses: actions/upload-artifact@v4
         with:
-          name: hello_flutter-ipa
-          path: build/ios/ipa/*.ipa
+          name: ios-build
+          path: |
+            build/ios/ipa/*.ipa
+            build/ios/iphoneos/*.app
+            build/ios/archive/*.xcarchive
+            build/ios/**/*.ipa
+
