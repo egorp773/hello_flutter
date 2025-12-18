@@ -1415,14 +1415,19 @@ class _StatusPanel extends StatelessWidget {
     final accent = wifi.isConnected ? Colors.white : accentGray;
 
     String statusText;
+    Color statusColor;
     if (wifi.isConnecting) {
       statusText = 'Подключение…';
+      statusColor = Colors.white;
     } else if (wifi.isConnected) {
       statusText = 'Подключено';
+      statusColor = Colors.green; // Зеленый для "Подключено"
     } else if (wifi.error != null) {
       statusText = wifi.error!;
+      statusColor = Colors.red; // Красный для ошибки
     } else {
       statusText = 'Не подключено';
+      statusColor = Colors.red; // Красный для "Не подключено"
     }
 
     return _GlassCard(
@@ -1443,7 +1448,7 @@ class _StatusPanel extends StatelessWidget {
                     wifi.isConnected
                         ? Icons.wifi_rounded
                         : Icons.wifi_off_rounded,
-                    color: accent,
+                    color: statusColor,
                     size: u(18).clamp(16.0, 18.0),
                   ),
                   SizedBox(width: u(8)),
@@ -1453,6 +1458,7 @@ class _StatusPanel extends StatelessWidget {
                       style: TextStyle(
                         fontWeight: FontWeight.w900,
                         fontSize: u(11.5).clamp(10.5, 11.5),
+                        color: statusColor,
                       ),
                       maxLines: 2,
                       softWrap: true,

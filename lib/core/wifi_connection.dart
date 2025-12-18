@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class WifiConnectionState {
@@ -39,13 +39,82 @@ class WifiConnectionState {
   }
 }
 
+/// ============================================================
+/// Wi-Fi ping check setting
+/// ============================================================
+final wifiPingCheckProvider =
+    StateNotifierProvider<WifiPingCheckNotifier, bool>(
+  (ref) => WifiPingCheckNotifier(),
+);
+
+class WifiPingCheckNotifier extends StateNotifier<bool> {
+  static const String _key = 'wifi_ping_check_enabled';
+  bool _initialized = false;
+
+  WifiPingCheckNotifier() : super(true) {
+    _init();
+  }
+
+  Future<void> _init() async {
+    if (_initialized) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final value = prefs.getBool(_key);
+      print('DEBUG: Loading wifi ping check from prefs: $value');
+      if (value != null) {
+        state = value;
+        print('DEBUG: Set wifi ping check state to: $value');
+      } else {
+        print('DEBUG: No saved value, using default: true');
+      }
+      _initialized = true;
+    } catch (e) {
+      print('DEBUG: Error loading wifi ping check: $e');
+      _initialized = true;
+      // Оставляем значение по умолчанию (true)
+    }
+  }
+
+  // Публичный метод для инициализации (если нужно вызвать извне)
+  Future<void> ensureInitialized() => _init();
+
+  Future<void> setEnabled(bool enabled) async {
+    print('DEBUG: setEnabled called with: $enabled');
+    state = enabled;
+    print('DEBUG: State updated to: $state');
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_key, enabled);
+      // Проверяем, что значение сохранилось
+      final saved = prefs.getBool(_key);
+      print('DEBUG: Saved wifi ping check: $enabled, read back: $saved');
+      if (saved != enabled) {
+        print('DEBUG: WARNING! Saved value does not match!');
+      }
+    } catch (e) {
+      print('DEBUG: Error saving wifi ping check: $e');
+      // Игнорируем ошибки сохранения
+    }
+  }
+
+  // Метод для получения актуального значения (с ожиданием инициализации)
+  Future<bool> getValue() async {
+    if (!_initialized) {
+      await _init();
+    }
+    return state;
+  }
+}
+
 final wifiConnectionProvider =
     StateNotifierProvider<WifiConnectionNotifier, WifiConnectionState>(
-  (ref) => WifiConnectionNotifier(),
+  (ref) => WifiConnectionNotifier(ref),
 );
 
 class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
-  WifiConnectionNotifier() : super(WifiConnectionState.initial());
+  final Ref _ref;
+
+  WifiConnectionNotifier(this._ref) : super(WifiConnectionState.initial());
 
   static const String _host = "192.168.4.1";
   static const int _port = 81;
@@ -55,7 +124,6 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
 
   Completer<void>? _pongWaiter;
 
-  Uri get _pingUri => Uri.parse("http://$_host:$_port/ping");
   Uri get _wsUri => Uri.parse("ws://$_host:$_port/ws");
 
   void _log(String line) {
@@ -65,19 +133,72 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
     state = state.copyWith(rxLog: next);
   }
 
-  Future<bool> _ping() async {
+  /// Минимальная проверка Wi-Fi: пробуем подключиться к WebSocket
+  /// Если WebSocket подключается - значит Wi-Fi есть
+  Future<bool> _testWebSocketConnection() async {
+    WebSocketChannel? testChannel;
+    StreamSubscription? testSub;
     try {
-      _log("→ GET $_pingUri");
-      final r = await http.get(_pingUri).timeout(const Duration(seconds: 5));
-      _log("← /ping ${r.statusCode}: ${r.body}");
-      final success =
-          r.statusCode == 200 && r.body.toUpperCase().contains("OK");
-      if (!success) {
-        _log("× /ping failed: status=${r.statusCode}, body=${r.body}");
+      _log("→ Testing WebSocket connection to $_wsUri");
+      testChannel = WebSocketChannel.connect(_wsUri);
+
+      final testCompleter = Completer<bool>();
+      bool gotMessage = false;
+
+      testSub = testChannel.stream.listen(
+        (msg) {
+          if (!gotMessage) {
+            gotMessage = true;
+            _log("← Test received: ${msg.toString().trim()}");
+            if (!testCompleter.isCompleted) {
+              testCompleter.complete(true);
+            }
+          }
+        },
+        onError: (e) {
+          _log("× Test WebSocket error: $e");
+          if (!testCompleter.isCompleted) {
+            testCompleter.complete(false);
+          }
+        },
+        onDone: () {
+          _log("× Test WebSocket closed");
+          if (!testCompleter.isCompleted) {
+            testCompleter.complete(false);
+          }
+        },
+        cancelOnError: false,
+      );
+
+      // Ждем либо первого сообщения, либо ошибки (максимум 3 секунды для теста)
+      final success = await testCompleter.future.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          _log("× Test WebSocket timeout");
+          return false;
+        },
+      );
+
+      // Закрываем тестовое соединение
+      await testSub.cancel();
+      testSub = null;
+      try {
+        testChannel.sink.close();
+      } catch (_) {}
+      testChannel = null;
+
+      if (success) {
+        _log("✓ WebSocket test: connection successful");
+      } else {
+        _log("× WebSocket test: connection failed");
       }
       return success;
     } catch (e) {
-      _log("× /ping error: $e");
+      _log("× WebSocket test error: $e");
+      try {
+        await testSub?.cancel();
+        testChannel?.sink.close();
+      } catch (_) {}
       return false;
     }
   }
@@ -88,25 +209,58 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
     state = state.copyWith(isConnecting: true, error: null);
     _log("=== CONNECT START ===");
 
-    final ok = await _ping();
-    if (!ok) {
+    // Проверяем настройку проверки Wi-Fi
+    // Убеждаемся, что настройка загружена
+    final notifier = _ref.read(wifiPingCheckProvider.notifier);
+    await notifier.ensureInitialized();
+
+    // Читаем актуальное значение после инициализации
+    final pingCheckEnabled = _ref.read(wifiPingCheckProvider);
+    _log("→ Wi-Fi check setting: $pingCheckEnabled");
+
+    if (!pingCheckEnabled) {
+      // Проверка отключена - просто устанавливаем статус "Подключено" без реального подключения
+      _log("→ Wi-Fi check disabled, simulating connection...");
+      state = state.copyWith(
+        isConnecting: false,
+        isConnected: true,
+        error: null,
+      );
+      _log("=== CONNECT OK (simulated) ===");
+      return;
+    }
+
+    // Проверка включена - выполняем минимальную проверку WebSocket
+    _log("→ Wi-Fi check enabled, testing WebSocket connection...");
+    final wsTestOk = await _testWebSocketConnection();
+    if (!wsTestOk) {
       state = state.copyWith(
         isConnecting: false,
         isConnected: false,
         error:
-            "Не вижу робота по Wi-Fi. Проверь что iPhone/Android подключён к сети Robot и открой /ping.",
+            "Не вижу робота по Wi-Fi. Проверь что iPhone/Android подключён к сети Robot.",
       );
-      _log("=== CONNECT FAIL: ping ===");
+      _log("=== CONNECT FAIL: WebSocket test failed ===");
       return;
     }
+    _log("✓ WebSocket test passed, Wi-Fi is available");
 
     try {
       _log("→ WS connect $_wsUri");
-      final ch = WebSocketChannel.connect(_wsUri);
+      WebSocketChannel ch;
+      try {
+        ch = WebSocketChannel.connect(_wsUri);
+        _log("→ WebSocket channel created");
+      } catch (e) {
+        _log("× Failed to create WebSocket channel: $e");
+        await disconnect(error: "Не удалось создать WebSocket соединение: $e");
+        return;
+      }
 
       // На iOS ready может не работать, поэтому используем другой подход
       // Устанавливаем канал сразу и слушаем stream
       _channel = ch;
+      _log("→ Waiting for connection and STATE,CONNECTED message...");
 
       // Создаем completer для отслеживания успешного подключения
       final connectionCompleter = Completer<bool>();
@@ -115,17 +269,22 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
       _sub?.cancel();
       _sub = ch.stream.listen(
         (msg) {
-          if (!connectionEstablished) {
-            connectionEstablished = true;
-            if (!connectionCompleter.isCompleted) {
-              connectionCompleter.complete(true);
-            }
-            _log("✓ WS connected (first message received)");
-          }
-
           final msgStr = msg.toString().trim();
           _log("← $msgStr");
           final upperMsg = msgStr.toUpperCase();
+
+          // Если получили STATE,CONNECTED - соединение установлено
+          if (upperMsg.contains("CONNECTED") || upperMsg.contains("STATE")) {
+            if (!connectionEstablished) {
+              connectionEstablished = true;
+              if (!connectionCompleter.isCompleted) {
+                connectionCompleter.complete(true);
+              }
+              _log("✓ WS connected (received CONNECTED message)");
+            }
+          }
+
+          // Обработка PONG (если робот его отправляет)
           if (upperMsg == "PONG" || upperMsg.startsWith("PONG")) {
             _log("✓ PONG received");
             _pongWaiter?.complete();
@@ -135,22 +294,24 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
         onError: (e) {
           _log("× WS stream error: $e");
           if (!connectionCompleter.isCompleted) {
+            _log("× Completing connectionCompleter with false due to error");
             connectionCompleter.complete(false);
           }
-          disconnect(error: "WebSocket ошибка: $e");
         },
         onDone: () {
-          _log("× WS stream closed");
+          _log("× WS stream closed (onDone)");
           if (!connectionCompleter.isCompleted) {
+            _log(
+                "× Completing connectionCompleter with false due to stream closed");
             connectionCompleter.complete(false);
           }
-          disconnect(error: "WebSocket закрыт");
         },
         cancelOnError: false,
       );
 
       // Ждем либо первого сообщения, либо ошибки (максимум 10 секунд)
       try {
+        _log("→ Waiting for STATE,CONNECTED message...");
         final connected = await connectionCompleter.future.timeout(
           const Duration(seconds: 10),
           onTimeout: () {
@@ -160,28 +321,21 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
         );
 
         if (!connected) {
+          _log("× Connection completer returned false");
           await disconnect(error: "Не удалось установить WebSocket соединение");
           return;
         }
 
-        // Даем немного времени на установку соединения
-        await Future.delayed(const Duration(milliseconds: 500));
+        // Робот уже отправил STATE,CONNECTED, значит соединение установлено
+        // Не требуем PONG, так как робот может не отвечать на PING текстовым сообщением
+        _log("✓ Connection established, setting isConnected = true");
+        state =
+            state.copyWith(isConnecting: false, isConnected: true, error: null);
+        _log("=== CONNECT OK ===");
 
-        // финальная проверка: PING/PONG
-        _log("→ Sending PING for handshake");
-        _pongWaiter = Completer<void>();
+        // Опционально: отправляем PING для проверки (но не ждем ответа)
+        _log("→ Sending PING (optional)");
         sendRaw("PING");
-
-        try {
-          await _pongWaiter!.future.timeout(const Duration(seconds: 5));
-          state = state.copyWith(
-              isConnecting: false, isConnected: true, error: null);
-          _log("=== CONNECT OK ===");
-        } catch (timeout) {
-          _log("× PONG timeout");
-          await disconnect(
-              error: "Робот не ответил на PING. Проверь подключение.");
-        }
       } catch (e) {
         _log("=== CONNECT FAIL: $e ===");
         await disconnect(error: "Не удалось подключиться по WebSocket: $e");

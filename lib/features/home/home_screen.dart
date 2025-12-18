@@ -280,8 +280,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             child: _BigActionCard(
                               uiScale: uiScale,
                               title: 'Ручное Управление',
-                              subtitle:
-                                  'Джойстик + запись маршрута (реальные команды)',
+                              subtitle: 'Джойстик + запись маршрута',
                               icon: Icons.sports_esports_rounded,
                               border: accentWhite.withOpacity(0.22),
                               glow: accentWhite.withOpacity(0.12),
@@ -1185,6 +1184,72 @@ class _CoreOption extends StatelessWidget {
   }
 }
 
+class _SettingSwitch extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  const _SettingSwitch({
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Colors.white;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: () => onChanged(!value),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          color: Colors.white.withOpacity(0.05),
+          border: Border.all(color: accent.withOpacity(0.18)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 14,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                      color: Colors.white.withOpacity(0.70),
+                      height: 1.15,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Switch(
+              value: value,
+              onChanged: onChanged,
+              activeColor: accent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _QuickSheet extends StatelessWidget {
   const _QuickSheet();
 
@@ -1233,10 +1298,23 @@ class _QuickSheet extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'Дальше добавим выбор сервиса/характеристик, автоподключение и телеметрию.',
-                  style: TextStyle(color: Colors.white.withOpacity(0.72)),
+                const SizedBox(height: 12),
+                Consumer(
+                  builder: (context, ref, _) {
+                    final pingCheckEnabled = ref.watch(wifiPingCheckProvider);
+                    return _SettingSwitch(
+                      title: 'Проверка Wi-Fi перед подключением',
+                      subtitle: pingCheckEnabled
+                          ? 'Проверяет доступность робота через /ping'
+                          : 'Пропускает проверку (для тестирования)',
+                      value: pingCheckEnabled,
+                      onChanged: (value) {
+                        ref
+                            .read(wifiPingCheckProvider.notifier)
+                            .setEnabled(value);
+                      },
+                    );
+                  },
                 ),
                 const SizedBox(height: 12),
                 SizedBox(
@@ -1280,14 +1358,19 @@ class _StatusPanel extends StatelessWidget {
     final accent = wifi.isConnected ? accentWhite : accentGray;
 
     String statusText;
+    Color statusColor;
     if (wifi.isConnecting) {
       statusText = 'Подключение…';
+      statusColor = Colors.white;
     } else if (wifi.isConnected) {
       statusText = 'Подключено';
+      statusColor = Colors.green; // Зеленый для "Подключено"
     } else if (wifi.error != null) {
       statusText = wifi.error!;
+      statusColor = Colors.red; // Красный для ошибки
     } else {
       statusText = 'Не подключено';
+      statusColor = Colors.red; // Красный для "Не подключено"
     }
 
     return _GlassCard(
@@ -1308,7 +1391,7 @@ class _StatusPanel extends StatelessWidget {
                     wifi.isConnected
                         ? Icons.wifi_rounded
                         : Icons.wifi_off_rounded,
-                    color: accent,
+                    color: statusColor,
                     size: u(18).clamp(16.0, 18.0),
                   ),
                   SizedBox(width: u(8)),
@@ -1318,6 +1401,7 @@ class _StatusPanel extends StatelessWidget {
                       style: TextStyle(
                         fontWeight: FontWeight.w900,
                         fontSize: u(11.5).clamp(10.5, 11.5),
+                        color: statusColor,
                       ),
                       maxLines: 2,
                       softWrap: true,
