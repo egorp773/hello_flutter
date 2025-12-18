@@ -29,7 +29,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   late final AnimationController _flareCtrl;
   late final AnimationController _robotCtrl;
 
-  late final Animation<double> _flareIntensity;
   late final Animation<double> _robotScale;
   late final Animation<double> _robotGlowBoost;
 
@@ -41,18 +40,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     );
-    _flareIntensity = TweenSequence<double>([
-      TweenSequenceItem(
-        tween: Tween(begin: 0.0, end: 1.0)
-            .chain(CurveTween(curve: Curves.easeOutCubic)),
-        weight: 35,
-      ),
-      TweenSequenceItem(
-        tween: Tween(begin: 1.0, end: 0.0)
-            .chain(CurveTween(curve: Curves.easeInCubic)),
-        weight: 65,
-      ),
-    ]).animate(_flareCtrl);
+
+    // Синхронизируем начальное состояние с подключением
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final wifi = ref.read(wifiConnectionProvider);
+      if (wifi.isConnected) {
+        _flareCtrl.value = 1.0;
+      }
+    });
 
     _robotCtrl = AnimationController(
       vsync: this,
@@ -102,8 +97,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     ref.listen<WifiConnectionState>(wifiConnectionProvider, (prev, next) {
       if (prev == null) return;
       if (prev.isConnected != next.isConnected && !next.isConnecting) {
-        _flareCtrl.forward(from: 0);
-        _robotCtrl.forward(from: 0);
+        if (next.isConnected) {
+          // При подключении - плавно до максимума и остаемся там
+          _flareCtrl.animateTo(1.0,
+              duration: const Duration(milliseconds: 600),
+              curve: Curves.easeOutCubic);
+          _robotCtrl.forward(from: 0);
+        } else {
+          // При отключении - плавно до нуля с анимацией робота
+          _flareCtrl.animateTo(0.0,
+              duration: const Duration(milliseconds: 500),
+              curve: Curves.easeInCubic);
+          _robotCtrl.forward(from: 0);
+        }
       }
     });
 
@@ -141,10 +147,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 child: IgnorePointer(
                   child: AnimatedBuilder(
                     animation: _flareCtrl,
-                    builder: (_, __) => _ConnectionFlareOverlay(
-                      isConnected: wifi.isConnected,
-                      intensity: _flareIntensity.value,
-                    ),
+                    builder: (_, __) {
+                      // Используем позицию контроллера напрямую для плавного перехода
+                      // Когда подключено - контроллер на 1.0, когда отключено - на 0.0
+                      final intensity = _flareCtrl.value;
+                      return _ConnectionFlareOverlay(
+                        isConnected: wifi.isConnected,
+                        intensity: intensity,
+                      );
+                    },
                   ),
                 ),
               ),
@@ -262,6 +273,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                         boostColor: wifi.isConnected
                                             ? accentWhite
                                             : accentGray,
+                                        core: core,
                                       ),
                                     );
                                   },
@@ -292,7 +304,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                             child: _BigActionCard(
                               uiScale: uiScale,
                               title: 'Автоматический Режим',
-                              subtitle: 'Пока заглушка — позже добавим',
+                              subtitle:
+                                  'Уборка территории в автоматическом режиме',
                               icon: Icons.route_rounded,
                               border: accentWhite.withOpacity(0.22),
                               glow: accentWhite.withOpacity(0.12),
@@ -690,11 +703,13 @@ class _RobotStable extends StatelessWidget {
   final Color neon;
   final double boost;
   final Color boostColor;
+  final String core;
 
   const _RobotStable({
     required this.neon,
     required this.boost,
     required this.boostColor,
+    required this.core,
   });
 
   @override
@@ -733,120 +748,38 @@ class _RobotStable extends StatelessWidget {
             ),
           ),
 
-          // Ground plane - пятно пола (эллипс с радиальным градиентом)
-          Positioned(
-            bottom: 0,
-            child: Container(
-              width: 280,
-              height: 80,
-              decoration: BoxDecoration(
-                shape: BoxShape.rectangle,
-                borderRadius: BorderRadius.circular(140),
-                gradient: RadialGradient(
-                  center: Alignment.topCenter,
-                  radius: 1.2,
-                  colors: [
-                    Colors.black.withOpacity(0.28),
-                    Colors.black.withOpacity(0.12),
-                    Colors.transparent,
-                  ],
-                  stops: const [0.0, 0.5, 1.0],
-                ),
-              ),
-            ),
-          ),
-
-          // Мягкая падающая тень (широкая, размытая)
-          Positioned(
-            bottom: 8,
-            child: ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 8),
-              child: Container(
-                width: 200,
-                height: 50,
-                decoration: BoxDecoration(
-                  shape: BoxShape.rectangle,
-                  borderRadius: BorderRadius.circular(100),
-                  color: Colors.black.withOpacity(0.35),
-                ),
-              ),
-            ),
-          ),
-
-          // Контактная тень (темная, резкая прямо под роботом)
-          Positioned(
-            bottom: 12,
-            child: ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 8, sigmaY: 4),
-              child: Container(
-                width: 140,
-                height: 24,
-                decoration: BoxDecoration(
-                  shape: BoxShape.rectangle,
-                  borderRadius: BorderRadius.circular(70),
-                  color: Colors.black.withOpacity(0.55),
-                ),
-              ),
-            ),
-          ),
-
-          // Отражение робота (опционально, очень слабое)
-          Positioned(
-            bottom: 0,
-            child: ClipRect(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                heightFactor: 0.35,
-                child: Transform(
-                  alignment: Alignment.bottomCenter,
-                  transform: Matrix4.identity()..scale(1.0, -1.0),
-                  child: ShaderMask(
-                    shaderCallback: (bounds) {
-                      return LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.white.withOpacity(0.08),
-                          Colors.white.withOpacity(0.0),
-                        ],
-                        stops: const [0.0, 1.0],
-                      ).createShader(bounds);
-                    },
-                    blendMode: BlendMode.dstIn,
-                    child: ImageFiltered(
-                      imageFilter: ImageFilter.blur(sigmaX: 2, sigmaY: 1),
-                      child: Opacity(
-                        opacity: 0.08,
-                        child: SizedBox(
-                          height: robotHeight * 0.35,
-                          child: Image.asset(
-                            'assets/images/robot.png',
-                            fit: BoxFit.contain,
-                            filterQuality: FilterQuality.high,
-                            errorBuilder: (_, __, ___) =>
-                                const SizedBox.shrink(),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-          // Робот (поверх всех эффектов)
+          // Робот с плавной анимацией перехода
           SizedBox(
             height: robotHeight,
-            child: Image.asset(
-              'assets/images/robot.png',
-              fit: BoxFit.contain,
-              filterQuality: FilterQuality.high,
-              gaplessPlayback: true,
-              errorBuilder: (_, __, ___) => Icon(
-                Icons.image_not_supported_outlined,
-                size: 46,
-                color: Colors.white.withOpacity(0.55),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 600),
+              transitionBuilder: (Widget child, Animation<double> animation) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: ScaleTransition(
+                    scale: Tween<double>(begin: 0.9, end: 1.0).animate(
+                      CurvedAnimation(
+                        parent: animation,
+                        curve: Curves.easeOutCubic,
+                      ),
+                    ),
+                    child: child,
+                  ),
+                );
+              },
+              child: Image.asset(
+                core == 'Теннисный Робот'
+                    ? 'assets/images/tennisbot.png'
+                    : 'assets/images/robot.png',
+                key: ValueKey<String>(core),
+                fit: BoxFit.contain,
+                filterQuality: FilterQuality.high,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => Icon(
+                  Icons.image_not_supported_outlined,
+                  size: 46,
+                  color: Colors.white.withOpacity(0.55),
+                ),
               ),
             ),
           ),
@@ -1104,9 +1037,9 @@ class _CorePickerSheet extends StatelessWidget {
                 ),
                 const SizedBox(height: 10),
                 _CoreOption(
-                  title: 'Модуль Для Газона',
-                  selected: selected == 'Модуль Для Газона',
-                  onTap: () => onSelect('Модуль Для Газона'),
+                  title: 'Теннисный Робот',
+                  selected: selected == 'Теннисный Робот',
+                  onTap: () => onSelect('Теннисный Робот'),
                 ),
               ],
             ),
@@ -1319,12 +1252,87 @@ class _QuickSheet extends StatelessWidget {
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
-                  child: FilledButton(
+                  child: _WhiteGlassButton(
+                    text: 'Закрыть',
                     onPressed: () => Navigator.pop(context),
-                    child: const Text('Закрыть'),
                   ),
                 ),
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// Beautiful contrast glass button (bright white with dark text)
+/// ============================================================
+class _WhiteGlassButton extends StatelessWidget {
+  final String text;
+  final VoidCallback? onPressed;
+  final bool isSecondary;
+
+  const _WhiteGlassButton({
+    required this.text,
+    this.onPressed,
+    this.isSecondary = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onPressed,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            decoration: BoxDecoration(
+              gradient: isSecondary
+                  ? null
+                  : LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Colors.white.withOpacity(0.95),
+                        Colors.white.withOpacity(0.85),
+                      ],
+                    ),
+              color: isSecondary
+                  ? Colors.white.withOpacity(0.25)
+                  : Colors.white.withOpacity(0.90),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: Colors.white.withOpacity(isSecondary ? 0.50 : 0.95),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.white.withOpacity(0.35),
+                  blurRadius: 20,
+                  spreadRadius: 0,
+                ),
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.15),
+                  blurRadius: 8,
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Center(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 15,
+                  color: Colors.black.withOpacity(0.92),
+                  letterSpacing: 0.3,
+                ),
+              ),
             ),
           ),
         ),

@@ -6,6 +6,9 @@ import 'package:go_router/go_router.dart';
 
 import 'features/home/home_screen.dart';
 import 'features/manual/manual_control_screen.dart';
+import 'features/maps/maps_screen.dart';
+import 'features/auto/auto_screen.dart';
+import 'features/auto/auto_map_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,7 +26,7 @@ void main() {
 }
 
 class _RootApp extends ConsumerWidget {
-  const _RootApp({super.key});
+  const _RootApp();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -37,6 +40,21 @@ class _RootApp extends ConsumerWidget {
         GoRoute(
           path: '/manual',
           builder: (_, __) => const ManualControlScreen(),
+        ),
+        GoRoute(
+          path: '/maps',
+          builder: (_, __) => const MapsScreen(),
+        ),
+        GoRoute(
+          path: '/auto',
+          builder: (_, __) => const AutoScreen(),
+        ),
+        GoRoute(
+          path: '/auto/map/:mapId',
+          builder: (context, state) {
+            final mapId = state.pathParameters['mapId']!;
+            return AutoMapScreen(mapId: mapId);
+          },
         ),
       ],
     );

@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:hello_flutter/core/wifi_connection.dart';
+import 'package:hello_flutter/core/map_storage.dart';
+import 'package:hello_flutter/features/maps/maps_screen.dart';
 
 /// ============================================================================
 /// Battery mock (потом заменим на реальную телеметрию)
@@ -28,6 +30,11 @@ enum ControlMode {
 
 final controlModeProvider =
     StateProvider<ControlMode>((ref) => ControlMode.joystick);
+
+/// ============================================================================
+/// Флаг для автоматического открытия окна ввода названия карты
+/// ============================================================================
+final autoOpenNameSheetProvider = StateProvider<bool>((ref) => false);
 
 /// ============================================================================
 /// Notice overlay — всегда поверх всего, с плавной анимацией
@@ -132,7 +139,7 @@ class ManualMapState {
   final DrawKind? kind;
 
   final Offset robot; // world position in cells
-  final double zoom; // 0.55..2.6
+  final double zoom; // 0.55..48.0
   final Offset pan; // pixels
 
   final List<PolyShape> zones;
@@ -140,6 +147,8 @@ class ManualMapState {
   final List<List<Offset>> transitions;
 
   final List<Offset> stroke; // current drawing
+  final Offset? startPoint; // начальная точка для автономного режима
+  final String? mapId; // ID карты для редактирования
 
   const ManualMapState({
     required this.stage,
@@ -152,6 +161,8 @@ class ManualMapState {
     required this.forbiddens,
     required this.transitions,
     required this.stroke,
+    this.startPoint,
+    this.mapId,
   });
 
   ManualMapState copyWith({
@@ -165,6 +176,8 @@ class ManualMapState {
     List<PolyShape>? forbiddens,
     List<List<Offset>>? transitions,
     List<Offset>? stroke,
+    Offset? startPoint,
+    String? mapId,
   }) {
     return ManualMapState(
       stage: stage ?? this.stage,
@@ -177,6 +190,8 @@ class ManualMapState {
       forbiddens: forbiddens ?? this.forbiddens,
       transitions: transitions ?? this.transitions,
       stroke: stroke ?? this.stroke,
+      startPoint: startPoint ?? this.startPoint,
+      mapId: mapId ?? this.mapId,
     );
   }
 
@@ -191,6 +206,8 @@ class ManualMapState {
         forbiddens: [],
         transitions: [],
         stroke: [],
+        startPoint: null,
+        mapId: null,
       );
 }
 
@@ -215,26 +232,84 @@ class ManualMapController extends StateNotifier<ManualMapState> {
 
   /// ✅ После выбора модификатора возвращаем "idle",
   /// чтобы появились Джойстик + Старт
+  /// Создаем начальную точку, если её еще нет
   void armForNextStart(DrawKind k) {
+    final newStartPoint = state.startPoint ?? state.robot;
     state = state.copyWith(
       kind: k,
       stage: ManualStage.idle,
+      startPoint: newStartPoint,
     );
   }
 
-  void setZoom(double z) => state = state.copyWith(zoom: z.clamp(0.55, 2.6));
+  void setZoom(double z) => state = state.copyWith(zoom: z.clamp(0.55, 48.0));
   void zoomIn() => setZoom(state.zoom * 1.12);
   void zoomOut() => setZoom(state.zoom / 1.12);
 
   void panBy(Offset dPx) => state = state.copyWith(pan: state.pan + dPx);
 
-  /// центрирование: сбрасываем панорамирование
-  void centerOnRobot() => state = state.copyWith(pan: Offset.zero);
+  /// центрирование: перемещаем карту так, чтобы робот оказался в центре экрана
+  void centerOnRobot(double uiScale, Size mapSize) {
+    // Вычисляем размер клетки с учетом зума
+    final baseCell = (18 * uiScale).clamp(14.0, 20.0);
+    final cell = baseCell * state.zoom;
+
+    // Центр экрана
+    final center = mapSize.center(Offset.zero);
+
+    // Текущая позиция робота на экране
+    final robotScreenPos = center +
+        state.pan +
+        Offset(
+          state.robot.dx * cell,
+          state.robot.dy * cell,
+        );
+
+    // Вычисляем нужный pan, чтобы робот был в центре
+    final newPan = state.pan - (robotScreenPos - center);
+
+    state = state.copyWith(pan: newPan);
+  }
 
   void resetAll() => state = ManualMapState.initial();
 
+  /// Загрузить карту из сохраненного состояния
+  void loadMap(ManualMapState loadedMap) {
+    // Находим начальную точку из всех фигур (первая точка первой зоны/перехода)
+    Offset? startPoint;
+
+    if (loadedMap.zones.isNotEmpty && loadedMap.zones.first.points.isNotEmpty) {
+      startPoint = loadedMap.zones.first.points.first;
+    } else if (loadedMap.transitions.isNotEmpty &&
+        loadedMap.transitions.first.isNotEmpty) {
+      startPoint = loadedMap.transitions.first.first;
+    } else if (loadedMap.forbiddens.isNotEmpty &&
+        loadedMap.forbiddens.first.points.isNotEmpty) {
+      startPoint = loadedMap.forbiddens.first.points.first;
+    }
+
+    // Устанавливаем робота в начальную точку или в (0, 0) если точек нет
+    state = loadedMap.copyWith(
+      stage: ManualStage
+          .completed, // Устанавливаем completed для показа меню редактирования
+      robot: startPoint ?? const Offset(0, 0),
+      pan: Offset.zero, // Сбрасываем pan для центрирования
+    );
+  }
+
   /// ✅ Перерисовать: НЕ сбрасывает название карты
-  void redrawKeepName() {
+  /// Показывает выбор режима (zone или transition)
+  Future<void> redrawKeepName(BuildContext context) async {
+    if (!_isConnected) {
+      ref.read(noticeProvider.notifier).show(const NoticeState(
+            title: 'Подключение',
+            message: 'Подключитесь к роботу.',
+            kind: NoticeKind.danger,
+          ));
+      return;
+    }
+
+    // Сбрасываем состояние
     state = state.copyWith(
       stage: ManualStage.idle,
       kind: null,
@@ -243,9 +318,29 @@ class ManualMapController extends StateNotifier<ManualMapState> {
       transitions: const [],
       stroke: const [],
     );
-    ref.read(noticeProvider.notifier).show(const NoticeState(
-          title: 'Перерисовка',
-          message: 'Переместите робота и нажмите «Старт».',
+
+    // Показываем выбор режима: либо режим уборки, либо путь до территории
+    final kind = await showModalBottomSheet<DrawKind>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withOpacity(0.55),
+      builder: (_) => _ModePickSheet(
+        title: 'Выбор Режима',
+        selected: null,
+        kinds: kStartKinds, // zone или transition
+      ),
+    );
+    if (kind == null) return;
+
+    // Устанавливаем режим и переходим в idle (появится кнопка Старт)
+    state = state.copyWith(
+      kind: kind,
+      stage: ManualStage.idle,
+    );
+
+    ref.read(noticeProvider.notifier).show(NoticeState(
+          title: 'Режим Выбран',
+          message: 'Нажмите «Старт» для начала рисования.',
           kind: NoticeKind.info,
         ));
   }
@@ -313,6 +408,70 @@ class ManualMapController extends StateNotifier<ManualMapState> {
   bool _needsClosure(DrawKind k) =>
       (k == DrawKind.zone || k == DrawKind.forbidden);
 
+  /// Проверка точки на краю полигона (с погрешностью 1 клетка)
+  bool _isPointOnEdge(Offset point, PolyShape polygon,
+      {double tolerance = 1.0}) {
+    final points = polygon.points;
+    if (points.length < 2) return false;
+
+    // Проверяем расстояние до каждого сегмента полигона
+    for (int i = 0; i < points.length; i++) {
+      final p1 = points[i];
+      final p2 = points[(i + 1) % points.length];
+
+      // Расстояние от точки до отрезка
+      final dist = _pointToSegmentDistance(point, p1, p2);
+      if (dist <= tolerance) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Расстояние от точки до отрезка
+  double _pointToSegmentDistance(Offset point, Offset segStart, Offset segEnd) {
+    final A = point.dx - segStart.dx;
+    final B = point.dy - segStart.dy;
+    final C = segEnd.dx - segStart.dx;
+    final D = segEnd.dy - segStart.dy;
+
+    final dot = A * C + B * D;
+    final lenSq = C * C + D * D;
+    if (lenSq == 0) {
+      // Отрезок вырожден в точку
+      return (point - segStart).distance;
+    }
+
+    final param = dot / lenSq;
+    Offset closest;
+    if (param < 0) {
+      closest = segStart;
+    } else if (param > 1) {
+      closest = segEnd;
+    } else {
+      closest = Offset(segStart.dx + param * C, segStart.dy + param * D);
+    }
+
+    return (point - closest).distance;
+  }
+
+  /// Проверка точки внутри полигона (ray casting algorithm)
+  bool _isPointInsidePolygon(Offset point, PolyShape polygon) {
+    final points = polygon.points;
+    if (points.length < 3) return false;
+
+    bool inside = false;
+    for (int i = 0, j = points.length - 1; i < points.length; j = i++) {
+      final xi = points[i].dx, yi = points[i].dy;
+      final xj = points[j].dx, yj = points[j].dy;
+
+      final intersect = ((yi > point.dy) != (yj > point.dy)) &&
+          (point.dx < (xj - xi) * (point.dy - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
   /// Запуск записи (когда имя и режим уже известны)
   void startDrawing() {
     if (!_isConnected) {
@@ -324,6 +483,56 @@ class ManualMapController extends StateNotifier<ManualMapState> {
       return;
     }
     if (state.mapName == null || state.kind == null) return;
+
+    // Устанавливаем начальную точку в позицию робота, если её еще нет
+    if (state.startPoint == null) {
+      state = state.copyWith(startPoint: state.robot);
+    }
+
+    // Проверка для transition при модификации (когда есть зоны)
+    if (state.kind == DrawKind.transition && state.zones.isNotEmpty) {
+      final startPoint = state.robot;
+      bool foundValidStart = false;
+
+      // Проверяем все зоны
+      for (final zone in state.zones) {
+        // Проверяем, что точка на краю (с погрешностью 1 клетка)
+        if (_isPointOnEdge(startPoint, zone, tolerance: 1.0)) {
+          foundValidStart = true;
+          break;
+        }
+      }
+
+      if (!foundValidStart) {
+        // Проверяем, не находится ли точка внутри какой-либо зоны
+        bool isInside = false;
+        for (final zone in state.zones) {
+          if (_isPointInsidePolygon(startPoint, zone)) {
+            isInside = true;
+            break;
+          }
+        }
+
+        if (isInside) {
+          // Точка внутри, но не на краю
+          ref.read(noticeProvider.notifier).show(const NoticeState(
+                title: 'Ошибка',
+                message:
+                    'Пожалуйста, начните рисовать путь с края территории (погрешность 1 клетка).',
+                kind: NoticeKind.danger,
+              ));
+          return;
+        } else {
+          // Точка за периметром
+          ref.read(noticeProvider.notifier).show(const NoticeState(
+                title: 'Ошибка',
+                message: 'Нельзя начинать путь за периметром территории.',
+                kind: NoticeKind.danger,
+              ));
+          return;
+        }
+      }
+    }
 
     state = state.copyWith(stage: ManualStage.drawing, stroke: [state.robot]);
 
@@ -373,27 +582,76 @@ class ManualMapController extends StateNotifier<ManualMapState> {
   void _commit(DrawKind k, List<Offset> pts) {
     if (k == DrawKind.zone) {
       state = state.copyWith(zones: [...state.zones, PolyShape(pts)]);
+      state = state.copyWith(stage: ManualStage.completed, stroke: const []);
+      ref.read(noticeProvider.notifier).show(const NoticeState(
+            title: 'Готово',
+            message: 'Запись завершена.',
+            kind: NoticeKind.success,
+          ));
     } else if (k == DrawKind.forbidden) {
       state = state.copyWith(forbiddens: [...state.forbiddens, PolyShape(pts)]);
+      state = state.copyWith(stage: ManualStage.completed, stroke: const []);
+      ref.read(noticeProvider.notifier).show(const NoticeState(
+            title: 'Готово',
+            message: 'Запись завершена.',
+            kind: NoticeKind.success,
+          ));
     } else {
+      // Transition завершен - автоматически начинаем зону уборки
       state = state.copyWith(transitions: [...state.transitions, pts]);
+      // Автоматически переключаемся на зону уборки и сразу начинаем рисование
+      state = state.copyWith(
+        kind: DrawKind.zone,
+        stage: ManualStage.drawing,
+        stroke: [state.robot],
+      );
+      ref.read(noticeProvider.notifier).show(const NoticeState(
+            title: 'Путь завершен',
+            message: 'Начата запись зоны уборки.',
+            kind: NoticeKind.success,
+          ));
     }
-
-    state = state.copyWith(stage: ManualStage.completed, stroke: const []);
-    ref.read(noticeProvider.notifier).show(const NoticeState(
-          title: 'Готово',
-          message: 'Запись завершена.',
-          kind: NoticeKind.success,
-        ));
   }
 
-  void saveAndReset() {
-    ref.read(noticeProvider.notifier).show(const NoticeState(
-          title: 'Карта Сохранена',
-          message: 'Данные сохранены. Вы можете начать заново.',
-          kind: NoticeKind.success,
-        ));
-    resetAll();
+  Future<void> saveAndReset() async {
+    if (state.mapName == null || state.mapName!.trim().isEmpty) {
+      ref.read(noticeProvider.notifier).show(const NoticeState(
+            title: 'Ошибка',
+            message: 'Укажите название карты перед сохранением.',
+            kind: NoticeKind.danger,
+          ));
+      return;
+    }
+
+    try {
+      await MapStorage.saveMap(state);
+      // Инвалидируем провайдер списка карт, чтобы он обновился
+      ref.invalidate(mapsListProvider);
+      final message = state.mapId != null
+          ? 'Карта "${state.mapName}" успешно обновлена.'
+          : 'Карта "${state.mapName}" успешно сохранена.';
+      ref.read(noticeProvider.notifier).show(NoticeState(
+            title: state.mapId != null ? 'Карта Обновлена' : 'Карта Сохранена',
+            message: message,
+            kind: NoticeKind.success,
+          ));
+      resetAll();
+    } catch (e) {
+      final errorMessage = e.toString();
+      String title = 'Ошибка Сохранения';
+      String message = 'Не удалось сохранить карту: $e';
+
+      if (errorMessage.contains('уже существует')) {
+        title = 'Дубликат Названия';
+        message = errorMessage.replaceAll('Exception: ', '');
+      }
+
+      ref.read(noticeProvider.notifier).show(NoticeState(
+            title: title,
+            message: message,
+            kind: NoticeKind.danger,
+          ));
+    }
   }
 
   static String _kindLabel(DrawKind k) {
@@ -475,6 +733,28 @@ class ManualControlScreen extends ConsumerStatefulWidget {
 }
 
 class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
+  bool _hasCheckedAutoOpen = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Проверяем флаг автоматического открытия окна ввода названия только один раз
+    if (!_hasCheckedAutoOpen) {
+      _hasCheckedAutoOpen = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final shouldOpen = ref.read(autoOpenNameSheetProvider);
+        if (shouldOpen) {
+          // Сбрасываем флаг
+          ref.read(autoOpenNameSheetProvider.notifier).state = false;
+          // Открываем окно ввода названия
+          final wifi = ref.read(wifiConnectionProvider);
+          _startWizard(context, wifi, null);
+        }
+      });
+    }
+  }
+
   Future<void> _toggleWifiConnection() async {
     final wifi = ref.read(wifiConnectionProvider);
     final ctrl = ref.read(wifiConnectionProvider.notifier);
@@ -539,6 +819,8 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
                           if (context.canPop()) {
                             context.pop();
                           } else {
+                            // Сбрасываем состояние карты при возврате на главный экран
+                            ref.read(manualMapProvider.notifier).resetAll();
                             context.go('/');
                           }
                         },
@@ -558,20 +840,25 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
                     ),
                     SizedBox(height: gap),
                     Expanded(
-                      child: _MapCard(
-                        uiScale: uiScale,
-                        state: s,
-                        onPan: (d) =>
-                            ref.read(manualMapProvider.notifier).panBy(d),
-                        onZoom: (z) =>
-                            ref.read(manualMapProvider.notifier).setZoom(z),
-                        onZoomIn: () =>
-                            ref.read(manualMapProvider.notifier).zoomIn(),
-                        onZoomOut: () =>
-                            ref.read(manualMapProvider.notifier).zoomOut(),
-                        onCenter: () => ref
-                            .read(manualMapProvider.notifier)
-                            .centerOnRobot(),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          return _MapCard(
+                            uiScale: uiScale,
+                            state: s,
+                            mapSize: constraints.biggest,
+                            onPan: (d) =>
+                                ref.read(manualMapProvider.notifier).panBy(d),
+                            onZoom: (z) =>
+                                ref.read(manualMapProvider.notifier).setZoom(z),
+                            onZoomIn: () =>
+                                ref.read(manualMapProvider.notifier).zoomIn(),
+                            onZoomOut: () =>
+                                ref.read(manualMapProvider.notifier).zoomOut(),
+                            onCenter: () => ref
+                                .read(manualMapProvider.notifier)
+                                .centerOnRobot(uiScale, constraints.biggest),
+                          );
+                        },
                       ),
                     ),
                     SizedBox(height: gap),
@@ -589,13 +876,20 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
                           wifi,
                           s.mapName,
                         ),
-                        onQuickStart: () =>
-                            ref.read(manualMapProvider.notifier).startDrawing(),
+                        onQuickStart: () {
+                          // Если есть название, но нет режима - показываем выбор режима
+                          if (s.mapName != null && s.kind == null) {
+                            _pickModeAndStart(context, wifi);
+                          } else {
+                            // Если есть название и режим - сразу начинаем рисование
+                            ref.read(manualMapProvider.notifier).startDrawing();
+                          }
+                        },
                         onStop: () =>
                             ref.read(manualMapProvider.notifier).stopDrawing(),
                         onRedraw: () => ref
                             .read(manualMapProvider.notifier)
-                            .redrawKeepName(),
+                            .redrawKeepName(context),
                         onModify: () => _openModifiers(context),
                         onSave: () =>
                             ref.read(manualMapProvider.notifier).saveAndReset(),
@@ -678,25 +972,48 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
         backgroundColor: Colors.transparent,
         isScrollControlled: true,
         barrierColor: Colors.black.withOpacity(0.55),
-        builder: (_) => const _NameMapSheet(),
+        builder: (_) {
+          final currentState = ref.read(manualMapProvider);
+          return _NameMapSheet(currentMapId: currentState.mapId);
+        },
       );
       if (name == null || name.trim().isEmpty) return;
       ref.read(manualMapProvider.notifier).setName(name.trim());
     }
 
-    // ✅ выбор режима: только kStartKinds (без запретной зоны)
+    // ✅ При первом создании карты - только ввод названия, без выбора режима
+    // Режим будет выбран при нажатии "Старт" (который появится после ввода названия)
+  }
+
+  /// Выбор режима при первом создании карты (после ввода названия)
+  Future<void> _pickModeAndStart(
+      BuildContext context, WifiConnectionState wifi) async {
+    if (!wifi.isConnected) {
+      ref.read(noticeProvider.notifier).show(const NoticeState(
+            title: 'Подключение',
+            message: 'Подключитесь к роботу.',
+            kind: NoticeKind.danger,
+          ));
+      return;
+    }
+
+    final s = ref.read(manualMapProvider);
+    if (s.mapName == null) return;
+
+    // Показываем выбор режима: либо режим уборки, либо путь до территории
     final kind = await showModalBottomSheet<DrawKind>(
       context: context,
       backgroundColor: Colors.transparent,
       barrierColor: Colors.black.withOpacity(0.55),
       builder: (_) => _ModePickSheet(
         title: 'Выбор Режима',
-        selected: ref.read(manualMapProvider).kind,
-        kinds: kStartKinds,
+        selected: s.kind,
+        kinds: kStartKinds, // zone или transition
       ),
     );
     if (kind == null) return;
 
+    // Устанавливаем режим и сразу начинаем рисование
     ref.read(manualMapProvider.notifier).setKind(kind);
     ref.read(manualMapProvider.notifier).startDrawing();
   }
@@ -838,13 +1155,13 @@ class _ControlsArea extends ConsumerWidget {
           children: [
             _PrimaryBtn(
               uiScale: uiScale,
-              text: 'Старт',
+              // ✅ Если есть название - показываем "Старт", иначе "Создать карту"
+              text: mapName != null ? 'Старт' : 'Создать карту',
               color: Colors.white,
               enabled: true,
-              // ✅ если уже есть имя+режим (например после Модификаторов) — стартуем сразу
-              onTap: (mapName != null && kind != null)
-                  ? onQuickStart
-                  : onStartWizard,
+              // ✅ если есть название — используем onQuickStart (который выберет режим или начнет рисование),
+              // иначе открываем мастер создания (ввод названия)
+              onTap: mapName != null ? onQuickStart : onStartWizard,
             ),
             SizedBox(height: gap),
             mode == ControlMode.joystick
@@ -1592,6 +1909,7 @@ class _ConnectBtn extends StatelessWidget {
 class _MapCard extends StatelessWidget {
   final double uiScale;
   final ManualMapState state;
+  final Size mapSize;
 
   final ValueChanged<Offset> onPan;
   final ValueChanged<double> onZoom;
@@ -1602,6 +1920,7 @@ class _MapCard extends StatelessWidget {
   const _MapCard({
     required this.uiScale,
     required this.state,
+    required this.mapSize,
     required this.onPan,
     required this.onZoom,
     required this.onZoomIn,
@@ -1691,7 +2010,7 @@ class _PanZoomSurfaceState extends State<_PanZoomSurface> {
         _lastFocal = d.focalPoint;
       },
       onScaleUpdate: (d) {
-        final nextZoom = (_startZoom * d.scale).clamp(0.55, 2.6);
+        final nextZoom = (_startZoom * d.scale).clamp(0.55, 48.0);
         widget.onZoom(nextZoom);
 
         final delta = d.focalPoint - _lastFocal;
@@ -1797,11 +2116,39 @@ class _GridPainter extends CustomPainter {
       }
     }
 
+    // Начальная точка — черный квадрат
+    if (s.startPoint != null) {
+      final sp = w2s(s.startPoint!);
+      final squareSize = (12 * uiScale * s.zoom).clamp(8.0, 16.0);
+      final squarePaint = Paint()
+        ..color = Colors.black
+        ..style = PaintingStyle.fill;
+      canvas.drawRect(
+        Rect.fromCenter(
+          center: sp,
+          width: squareSize,
+          height: squareSize,
+        ),
+        squarePaint,
+      );
+      // Обводка квадрата
+      final borderPaint = Paint()
+        ..color = Colors.white.withOpacity(0.5)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5;
+      canvas.drawRect(
+        Rect.fromCenter(
+          center: sp,
+          width: squareSize,
+          height: squareSize,
+        ),
+        borderPaint,
+      );
+    }
+
     // робот — белый круг
     final rp = w2s(s.robot);
     final r = (6 * uiScale).clamp(5.0, 7.0);
-    canvas.drawCircle(
-        rp, r + 6, Paint()..color = Colors.black.withOpacity(0.25));
     canvas.drawCircle(rp, r, Paint()..color = Colors.white.withOpacity(0.95));
   }
 
@@ -1854,7 +2201,9 @@ class _GridPainter extends CustomPainter {
 /// Sheets
 /// ============================================================================
 class _NameMapSheet extends ConsumerStatefulWidget {
-  const _NameMapSheet();
+  final String? currentMapId; // ID текущей карты при редактировании
+
+  const _NameMapSheet({this.currentMapId});
 
   @override
   ConsumerState<_NameMapSheet> createState() => _NameMapSheetState();
@@ -1862,11 +2211,31 @@ class _NameMapSheet extends ConsumerStatefulWidget {
 
 class _NameMapSheetState extends ConsumerState<_NameMapSheet> {
   final _c = TextEditingController();
+  String? _errorMessage;
 
   @override
   void dispose() {
     _c.dispose();
     super.dispose();
+  }
+
+  Future<bool> _checkDuplicateName(String name) async {
+    if (name.trim().isEmpty) return false;
+
+    final maps = await MapStorage.listMaps();
+    final trimmedName = name.trim().toLowerCase();
+    final currentId = widget.currentMapId;
+
+    for (final map in maps) {
+      // Пропускаем текущую карту при редактировании
+      if (currentId != null && map.id == currentId) continue;
+
+      if (map.name.toLowerCase() == trimmedName) {
+        return true; // Дубликат найден
+      }
+    }
+
+    return false; // Дубликатов нет
   }
 
   @override
@@ -1919,12 +2288,68 @@ class _NameMapSheetState extends ConsumerState<_NameMapSheet> {
                     ),
                   ),
                 ),
+                if (_errorMessage != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.red.withOpacity(0.4),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.error_outline_rounded,
+                          color: Colors.red.withOpacity(0.9),
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _errorMessage!,
+                            style: TextStyle(
+                              color: Colors.red.withOpacity(0.9),
+                              fontWeight: FontWeight.w800,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
-                  child: FilledButton(
-                    onPressed: () => Navigator.pop(context, _c.text),
-                    child: const Text('Далее'),
+                  child: _WhiteGlassButton(
+                    text: 'Далее',
+                    onPressed: () async {
+                      final name = _c.text.trim();
+                      if (name.isEmpty) return;
+
+                      // Проверяем на дубликаты
+                      final isDuplicate = await _checkDuplicateName(name);
+                      if (isDuplicate) {
+                        setState(() {
+                          _errorMessage =
+                              'Карта с названием "$name" уже существует. Введите другое название.';
+                        });
+                        // Очищаем поле ввода
+                        _c.clear();
+                        return; // Не закрываем окно
+                      }
+
+                      // Если дубликатов нет, закрываем окно и возвращаем название
+                      setState(() {
+                        _errorMessage = null;
+                      });
+                      if (mounted) {
+                        Navigator.pop(context, name);
+                      }
+                    },
                   ),
                 ),
               ],
@@ -2198,9 +2623,9 @@ class _SpeedSettingsSheet extends ConsumerWidget {
             const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
-              child: FilledButton(
+              child: _WhiteGlassButton(
+                text: 'Закрыть',
                 onPressed: () => Navigator.pop(context),
-                child: const Text('Закрыть'),
               ),
             ),
           ],
@@ -2358,23 +2783,24 @@ class _TerminalSheetState extends ConsumerState<_TerminalSheet> {
                       ),
                     ),
                     const SizedBox(width: 10),
-                    FilledButton(
+                    _WhiteGlassButton(
+                      text: 'Отправить',
                       onPressed: () async {
                         final text = _c.text;
                         _c.clear();
                         await ref.read(terminalProvider.notifier).send(text);
                       },
-                      child: const Text('Отправить'),
                     ),
                   ],
                 ),
                 const SizedBox(height: 10),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: TextButton(
+                  child: _WhiteGlassButton(
+                    text: 'Очистить',
+                    isSecondary: true,
                     onPressed: () =>
                         ref.read(terminalProvider.notifier).clear(),
-                    child: const Text('Очистить'),
                   ),
                 ),
               ],
@@ -2462,6 +2888,81 @@ class _GlassSheet extends StatelessWidget {
               const SizedBox(height: 10),
               child,
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ============================================================================
+/// Beautiful contrast glass button (bright white with dark text)
+/// ============================================================================
+class _WhiteGlassButton extends StatelessWidget {
+  final String text;
+  final VoidCallback? onPressed;
+  final bool isSecondary;
+
+  const _WhiteGlassButton({
+    required this.text,
+    this.onPressed,
+    this.isSecondary = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onPressed,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            decoration: BoxDecoration(
+              gradient: isSecondary
+                  ? null
+                  : LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Colors.white.withOpacity(0.95),
+                        Colors.white.withOpacity(0.85),
+                      ],
+                    ),
+              color: isSecondary
+                  ? Colors.white.withOpacity(0.25)
+                  : Colors.white.withOpacity(0.90),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: Colors.white.withOpacity(isSecondary ? 0.50 : 0.95),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.white.withOpacity(0.35),
+                  blurRadius: 20,
+                  spreadRadius: 0,
+                ),
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.15),
+                  blurRadius: 8,
+                  spreadRadius: 0,
+                ),
+              ],
+            ),
+            child: Center(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 15,
+                  color: Colors.black.withOpacity(0.92),
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ),
           ),
         ),
       ),
