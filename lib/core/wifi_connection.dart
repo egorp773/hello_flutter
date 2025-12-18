@@ -1,383 +1,253 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:network_info_plus/network_info_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-final wifiConnectionProvider =
-    StateNotifierProvider<WifiConnectionController, WifiConnectionState>((ref) {
-  return WifiConnectionController(ref);
-});
-
-@immutable
 class WifiConnectionState {
-  final bool isConnected;
-  final bool isBusy; // подключение/отключение
+  final bool isWifi;
   final bool isConnecting;
-  final bool isSupported; // всегда true для WebSocket
-  final bool isWifiOk; // SSID подходит
-
-  final String deviceName; // имя робота (из SSID или по умолчанию)
+  final bool isConnected;
   final String? error;
-
-  final List<String> logLines; // RX/TX терминал
+  final List<String> rxLog;
 
   const WifiConnectionState({
-    required this.isConnected,
-    required this.isBusy,
+    required this.isWifi,
     required this.isConnecting,
-    required this.isSupported,
-    required this.isWifiOk,
-    required this.deviceName,
-    required this.error,
-    required this.logLines,
+    required this.isConnected,
+    this.error,
+    this.rxLog = const [],
   });
 
-  factory WifiConnectionState.initial() => const WifiConnectionState(
-        isConnected: false,
-        isBusy: false,
-        isConnecting: false,
-        isSupported: true,
-        isWifiOk: false,
-        deviceName: 'HoverRobot',
-        error: null,
-        logLines: [],
-      );
-
   WifiConnectionState copyWith({
-    bool? isConnected,
-    bool? isBusy,
+    bool? isWifi,
     bool? isConnecting,
-    bool? isSupported,
-    bool? isWifiOk,
-    String? deviceName,
+    bool? isConnected,
     String? error,
-    List<String>? logLines,
+    List<String>? rxLog,
   }) {
     return WifiConnectionState(
-      isConnected: isConnected ?? this.isConnected,
-      isBusy: isBusy ?? this.isBusy,
+      isWifi: isWifi ?? this.isWifi,
       isConnecting: isConnecting ?? this.isConnecting,
-      isSupported: isSupported ?? this.isSupported,
-      isWifiOk: isWifiOk ?? this.isWifiOk,
-      deviceName: deviceName ?? this.deviceName,
+      isConnected: isConnected ?? this.isConnected,
       error: error,
-      logLines: logLines ?? this.logLines,
+      rxLog: rxLog ?? this.rxLog,
     );
   }
+
+  static const initial = WifiConnectionState(
+    isWifi: false,
+    isConnecting: false,
+    isConnected: false,
+    error: null,
+    rxLog: [],
+  );
 }
 
+final wifiConnectionProvider =
+    StateNotifierProvider<WifiConnectionController, WifiConnectionState>(
+  (ref) => WifiConnectionController(),
+);
+
 class WifiConnectionController extends StateNotifier<WifiConnectionState> {
-  final Ref ref;
+  WifiConnectionController() : super(WifiConnectionState.initial) {
+    _watchConnectivity();
+  }
+
+  final _connectivity = Connectivity();
+  StreamSubscription? _connSub;
+
   WebSocketChannel? _channel;
-  StreamSubscription? _wsSubscription;
-  Timer? _reconnectTimer;
-  Timer? _throttleTimer;
+  StreamSubscription? _wsSub;
 
-  static const String _robotUrl = 'ws://192.168.4.1:81/ws';
-  static const int _throttleMs = 30; // throttling для команд джойстика
-  static const int _maxLog = 220;
+  // Хост твоего ESP32 AP
+  final String host = "192.168.4.1";
+  final int port = 81;
+  final String path = "/ws";
 
-  String? _lastMoveCommand; // для throttling
+  // очередь команд, если отправили чуть раньше соединения
+  final List<String> _queue = [];
 
-  WifiConnectionController(this.ref) : super(WifiConnectionState.initial()) {
-    _boot();
+  void _log(String s) {
+    final next = [...state.rxLog, s];
+    state = state.copyWith(
+        rxLog: next.length > 200 ? next.sublist(next.length - 200) : next);
   }
 
-  Future<void> _boot() async {
-    // Проверяем Wi-Fi при старте
-    await _checkWifi();
+  Future<void> _watchConnectivity() async {
+    final first = await _connectivity.checkConnectivity();
+    state = state.copyWith(isWifi: first.contains(ConnectivityResult.wifi));
 
-    // Периодически проверяем Wi-Fi (каждые 3 секунды)
-    Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!state.isConnected) {
-        _checkWifi();
+    _connSub = _connectivity.onConnectivityChanged.listen((res) {
+      final isWifi = res.contains(ConnectivityResult.wifi);
+      state = state.copyWith(isWifi: isWifi);
+
+      // если Wi-Fi пропал — рвём соединение
+      if (!isWifi && state.isConnected) {
+        disconnect();
       }
     });
   }
 
-  /// Проверка Wi-Fi SSID
-  Future<void> _checkWifi() async {
-    try {
-      final ssid = await getWifiName();
-      final isOk = isCorrectWifi(ssid);
+  Uri get wsUri => Uri.parse("ws://$host:$port$path");
 
-      String deviceName = state.deviceName;
-      if (ssid != null && isOk) {
-        deviceName = ssid;
-      }
-
-      state = state.copyWith(
-        isWifiOk: isOk,
-        deviceName: deviceName,
-        error: isOk
-            ? null
-            : (state.error?.contains('Wi-Fi') == true ? state.error : null),
-      );
-    } catch (e) {
-      // На iOS может быть недоступен SSID - это нормально
-      if (kDebugMode) {
-        _appendLog('⚠ Wi-Fi check: $e');
-      }
-    }
-  }
-
-  /// Получить SSID текущей Wi-Fi сети
-  Future<String?> getWifiName() async {
-    if (kIsWeb) {
-      return null; // Web не поддерживает
-    }
-
-    try {
-      // На Android 10+ нужен location permission для SSID
-      if (Platform.isAndroid) {
-        final status = await Permission.locationWhenInUse.status;
-        if (!status.isGranted) {
-          final result = await Permission.locationWhenInUse.request();
-          if (!result.isGranted) {
-            return null;
-          }
-        }
-      }
-
-      final networkInfo = NetworkInfo();
-      final wifiName = await networkInfo.getWifiName();
-
-      // На Android может вернуться в кавычках, убираем их
-      if (wifiName != null &&
-          wifiName.startsWith('"') &&
-          wifiName.endsWith('"')) {
-        return wifiName.substring(1, wifiName.length - 1);
-      }
-
-      return wifiName;
-    } catch (e) {
-      if (kDebugMode) {
-        _appendLog('⚠ getWifiName error: $e');
-      }
-      return null;
-    }
-  }
-
-  /// Проверка, что SSID подходит (содержит "Robot" или "HoverRobot")
-  bool isCorrectWifi(String? ssid) {
-    if (ssid == null) return false;
-    final lower = ssid.toLowerCase();
-    return lower.contains('robot') || lower.contains('hoverrobot');
-  }
-
-  /// Подключение к WebSocket
   Future<void> connect() async {
-    if (state.isConnected || state.isConnecting) {
+    if (state.isConnecting) return;
+
+    // Главное: НЕ проверяем SSID. Только факт Wi-Fi.
+    if (!state.isWifi) {
+      state =
+          state.copyWith(error: "Телефон не в Wi-Fi. Подключись к сети Robot.");
       return;
     }
 
-    state = state.copyWith(
-      isConnecting: true,
-      isBusy: true,
-      error: null,
-    );
-
-    // Проверяем Wi-Fi перед подключением
-    await _checkWifi();
-
-    if (!state.isWifiOk) {
-      state = state.copyWith(
-        isConnecting: false,
-        isBusy: false,
-        error: 'Подключитесь к Wi-Fi робота',
-      );
-      _appendLog('✗ CONNECT: Wi-Fi не подходит');
-      return;
-    }
+    state = state.copyWith(isConnecting: true, error: null);
 
     try {
-      _appendLog('… CONNECTING to $_robotUrl');
-
-      final uri = Uri.parse(_robotUrl);
-      _channel = WebSocketChannel.connect(uri);
-
-      // Подписываемся на входящие сообщения
-      _wsSubscription?.cancel();
-      _wsSubscription = _channel!.stream.listen(
-        (message) {
-          final text = message.toString();
-          if (text.trim().isNotEmpty) {
-            _appendLog('← $text');
-          }
-        },
-        onError: (error) {
-          _appendLog('✗ WS ERROR: $error');
-          _handleDisconnection('ошибка WebSocket: $error');
-        },
-        onDone: () {
-          _appendLog('… WS CLOSED');
-          _handleDisconnection('соединение закрыто');
-        },
-        cancelOnError: true,
+      // таймаут на коннект
+      final socket = await WebSocket.connect(wsUri.toString()).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => throw TimeoutException("WebSocket connect timeout"),
       );
 
-      // Небольшая задержка для установки соединения
-      await Future.delayed(const Duration(milliseconds: 500));
+      _channel = IOWebSocketChannel(socket);
+      _log("✓ WS connected: $wsUri");
 
-      state = state.copyWith(
-        isConnected: true,
-        isConnecting: false,
-        isBusy: false,
-      );
+      // слушаем входящие
+      _wsSub?.cancel();
+      _wsSub = _channel!.stream.listen((event) {
+        final msg = event.toString();
+        _log("← $msg");
+        _onIncoming(msg);
+      }, onError: (e) {
+        state = state.copyWith(
+            error: "WS error: $e", isConnected: false, isConnecting: false);
+      }, onDone: () {
+        state = state.copyWith(isConnected: false, isConnecting: false);
+        _log("× WS closed");
+      });
 
-      _appendLog('✓ CONNECTED to $_robotUrl');
+      // рукопожатие
+      final ok = await _handshake();
+      if (!ok) {
+        await disconnect();
+        state =
+            state.copyWith(error: "Робот не ответил на handshake (PING/PONG).");
+        return;
+      }
+
+      state =
+          state.copyWith(isConnected: true, isConnecting: false, error: null);
+      _log("✓ Handshake OK. CONNECTED.");
+
+      // слить очередь
+      for (final cmd in _queue) {
+        _sendRaw(cmd);
+      }
+      _queue.clear();
     } catch (e) {
-      _appendLog('✗ CONNECT FAIL: $e');
       state = state.copyWith(
-        isConnected: false,
-        isConnecting: false,
-        isBusy: false,
-        error: 'Ошибка подключения: $e',
-      );
-      _cleanup();
+          isConnecting: false, isConnected: false, error: e.toString());
     }
   }
 
-  /// Отключение от WebSocket
-  Future<void> disconnect() async {
-    if (!state.isConnected) {
-      return;
+  Future<bool> _handshake() async {
+    // Ждём PONG/OK максимум 2 сек
+    final completer = Completer<bool>();
+    late final Timer timer;
+
+    void handler(String msg) {
+      final m = msg.trim().toUpperCase();
+      if (m == "PONG" || m.startsWith("PONG") || m == "OK") {
+        if (!completer.isCompleted) completer.complete(true);
+      }
     }
 
-    _appendLog('… DISCONNECT');
+    // временный “перехват” через логический обработчик
+    _tempIncomingHandler = handler;
 
-    // Отправляем STOP перед отключением
-    if (_channel != null) {
-      try {
-        _channel!.sink.add('STOP');
-        _appendLog('→ STOP');
-        await Future.delayed(const Duration(milliseconds: 100));
-      } catch (_) {}
-    }
-
-    _cleanup();
-
-    state = state.copyWith(
-      isConnected: false,
-      isConnecting: false,
-      isBusy: false,
-    );
-  }
-
-  void _handleDisconnection(String reason) {
-    _appendLog('… DISCONNECTED ($reason)');
-    _cleanup();
-    state = state.copyWith(
-      isConnected: false,
-      isConnecting: false,
-      isBusy: false,
-      error: reason,
-    );
-  }
-
-  void _cleanup() {
-    _wsSubscription?.cancel();
-    _wsSubscription = null;
-    _channel?.sink.close();
-    _channel = null;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _throttleTimer?.cancel();
-    _throttleTimer = null;
-    _lastMoveCommand = null;
-  }
-
-  /// Отправка команды движения: M,left,right
-  void sendMove(int left, int right) {
-    if (!state.isConnected || _channel == null) {
-      return;
-    }
-
-    // Ограничиваем значения
-    final leftClamped = left.clamp(-100, 100);
-    final rightClamped = right.clamp(-100, 100);
-
-    final command = 'M,$leftClamped,$rightClamped';
-
-    // Throttling: не отправляем одинаковые команды слишком часто
-    if (_lastMoveCommand == command) {
-      return;
-    }
-
-    _throttleTimer?.cancel();
-    _throttleTimer = Timer(Duration(milliseconds: _throttleMs), () {
-      _lastMoveCommand = null;
+    timer = Timer(const Duration(seconds: 2), () {
+      if (!completer.isCompleted) completer.complete(false);
     });
 
-    _lastMoveCommand = command;
-
-    try {
-      _channel!.sink.add(command);
-      // Не логируем каждую команду джойстика, чтобы не засорять лог
-    } catch (e) {
-      _appendLog('✗ SEND MOVE FAIL: $e');
-      if (state.isConnected) {
-        state = state.copyWith(error: 'Ошибка отправки: $e');
-      }
-    }
+    _sendRaw("PING");
+    final ok = await completer.future;
+    timer.cancel();
+    _tempIncomingHandler = null;
+    return ok;
   }
 
-  /// Отправка команды STOP
-  void sendStop() {
-    if (!state.isConnected || _channel == null) {
-      return;
-    }
-
-    _lastMoveCommand = null;
-    _throttleTimer?.cancel();
-    _throttleTimer = null;
-
-    try {
-      _channel!.sink.add('STOP');
-      _appendLog('→ STOP');
-    } catch (e) {
-      _appendLog('✗ SEND STOP FAIL: $e');
-      if (state.isConnected) {
-        state = state.copyWith(error: 'Ошибка отправки STOP: $e');
-      }
-    }
+  void _sendRaw(String text) {
+    _channel?.sink.add(text);
+    _log("→ $text");
   }
 
-  /// Отправка произвольной команды (для терминала)
-  Future<void> sendRaw(String text) async {
+  // Публичный метод для терминала
+  void sendRaw(String text) {
     final t = text.trim();
     if (t.isEmpty) return;
 
-    if (!state.isConnected || _channel == null) {
-      _appendLog('✗ TX (нет соединения)');
+    if (!state.isConnected) {
+      _queue.add(t);
       return;
     }
-
-    try {
-      _channel!.sink.add(t);
-      _appendLog('→ $t');
-    } catch (e) {
-      state = state.copyWith(error: 'Ошибка отправки: $e');
-      _appendLog('✗ TX FAIL: $e');
-    }
+    _sendRaw(t);
   }
 
-  void clearLog() => state = state.copyWith(logLines: []);
+  Future<void> disconnect() async {
+    state = state.copyWith(isConnecting: false, isConnected: false);
+    try {
+      await _wsSub?.cancel();
+      await _channel?.sink.close();
+    } catch (_) {}
+    _wsSub = null;
+    _channel = null;
+    _log("× Disconnected");
+  }
 
-  void _appendLog(String line) {
-    final next = [...state.logLines, line];
-    final trimmed =
-        next.length <= _maxLog ? next : next.sublist(next.length - _maxLog);
-    state = state.copyWith(logLines: trimmed);
+  // ====== команды управления ======
+  void sendMove(int left, int right) {
+    final l = left.clamp(-100, 100);
+    final r = right.clamp(-100, 100);
+    final cmd = "M,$l,$r";
+
+    if (!state.isConnected) {
+      _queue.add(cmd); // чтобы не терять команды
+      return;
+    }
+    _sendRaw(cmd);
+  }
+
+  void sendStop() {
+    const cmd = "STOP";
+    if (!state.isConnected) {
+      _queue.add(cmd);
+      return;
+    }
+    _sendRaw(cmd);
+  }
+
+  // ====== входящие ======
+  void Function(String msg)? _tempIncomingHandler;
+
+  void _onIncoming(String msg) {
+    _tempIncomingHandler?.call(msg);
+
+    // тут можешь парсить телеметрию
+    // например JSON: {"bat":30,"gps":1}
+    // try { final j=jsonDecode(msg); ... } catch (_) {}
+  }
+
+  void clearLog() {
+    state = state.copyWith(rxLog: []);
   }
 
   @override
   void dispose() {
-    _cleanup();
+    _connSub?.cancel();
+    disconnect();
     super.dispose();
   }
 }

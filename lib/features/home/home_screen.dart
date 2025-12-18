@@ -12,6 +12,11 @@ import 'package:hello_flutter/core/wifi_connection.dart';
 /// ============================================================
 final controlCoreProvider = StateProvider<String>((ref) => 'Модуль Для Снега');
 
+/// ============================================================
+/// Battery mock (потом заменим на реальную телеметрию)
+/// ============================================================
+final batteryPercentProvider = StateProvider<int>((ref) => 46);
+
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -92,6 +97,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   Widget build(BuildContext context) {
     final wifi = ref.watch(wifiConnectionProvider);
     final core = ref.watch(controlCoreProvider);
+    final battery = ref.watch(batteryPercentProvider);
 
     ref.listen<WifiConnectionState>(wifiConnectionProvider, (prev, next) {
       if (prev == null) return;
@@ -104,26 +110,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     // Черно-белая цветовая схема
     const accentWhite = Colors.white;
     const accentGray = Color(0xFF9E9E9E);
-
-    final accent = wifi.isConnected ? accentWhite : accentGray;
-
-    String statusTitle;
-    String statusSubtitle;
-
-    if (!wifi.isWifiOk) {
-      statusTitle = 'Wi-Fi Не Подключён';
-      statusSubtitle = 'Подключитесь к Wi-Fi робота.';
-    } else if (wifi.isConnected) {
-      statusTitle = 'Готов К Работе';
-      statusSubtitle =
-          'Подключено к ${wifi.deviceName}. Можно управлять роботом.';
-    } else if (wifi.isConnecting || wifi.isBusy) {
-      statusTitle = 'Подключение…';
-      statusSubtitle = 'Подключаемся к роботу по Wi-Fi.';
-    } else {
-      statusTitle = 'Ожидает Подключения';
-      statusSubtitle = 'Нажмите «Подключить» для соединения с роботом.';
-    }
 
     return Scaffold(
       body: LayoutBuilder(
@@ -199,8 +185,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                                   SizedBox(width: s(8).clamp(6.0, 8.0)),
                                   _WifiStatusIndicator(
                                     isConnected: wifi.isConnected,
-                                    isBusy: wifi.isBusy || wifi.isConnecting,
-                                    deviceName: wifi.deviceName,
+                                    isBusy: wifi.isConnecting,
+                                    deviceName: null,
                                     size: s(14).clamp(12.0, 14.0),
                                   ),
                                 ],
@@ -237,95 +223,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
                       SizedBox(height: gapM),
 
-                      // STATUS CARD
-                      _GlassCard(
-                        borderColor: accent.withOpacity(0.55),
-                        child: Padding(
-                          padding: EdgeInsets.all(s(14).clamp(9.0, 14.0)),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _BtStatusOrb(
-                                size: s(44).clamp(36.0, 44.0),
-                                isConnected: wifi.isConnected,
-                                isBusy: wifi.isBusy || wifi.isConnecting,
-                              ),
-                              SizedBox(width: s(12)),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    LayoutBuilder(
-                                      builder: (context, c) {
-                                        final btnW = (c.maxWidth * 0.46)
-                                            .clamp(s(155), s(245));
-                                        return Row(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Expanded(
-                                              child: AdaptiveText(
-                                                statusTitle,
-                                                maxLines: 2,
-                                                minFontSize:
-                                                    s(12.0).clamp(10.0, 12.0),
-                                                maxFontSize:
-                                                    s(17.0).clamp(13.0, 17.0),
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.w900,
-                                                  letterSpacing: 0.10,
-                                                  height: 1.08,
-                                                ),
-                                              ),
-                                            ),
-                                            SizedBox(width: s(10)),
-                                            _BigConnectButton(
-                                              width: btnW,
-                                              height: s(52).clamp(42.0, 52.0),
-                                              isConnected: wifi.isConnected,
-                                              isBusy: wifi.isBusy ||
-                                                  wifi.isConnecting,
-                                              color: accent,
-                                              minText: s(10).clamp(9.0, 10.0),
-                                              maxText: s(15).clamp(12.0, 15.0),
-                                              onTap: () async {
-                                                final ctrl = ref.read(
-                                                    wifiConnectionProvider
-                                                        .notifier);
+                      // STATUS CARD (такой же, как на втором экране)
+                      _StatusPanel(
+                        uiScale: uiScale,
+                        wifi: wifi,
+                        batteryPercent: battery,
+                        onToggle: () async {
+                          final ctrl =
+                              ref.read(wifiConnectionProvider.notifier);
 
-                                                if (wifi.isConnected) {
-                                                  await ctrl.disconnect();
-                                                  return;
-                                                }
+                          if (wifi.isConnected) {
+                            await ctrl.disconnect();
+                            return;
+                          }
 
-                                                await ctrl.connect();
-                                              },
-                                            ),
-                                          ],
-                                        );
-                                      },
-                                    ),
-                                    SizedBox(height: s(8).clamp(5.0, 8.0)),
-                                    AdaptiveText(
-                                      wifi.error == null
-                                          ? statusSubtitle
-                                          : (wifi.error!),
-                                      maxLines: 3,
-                                      minFontSize: s(10.0).clamp(9.0, 10.0),
-                                      maxFontSize: s(13.0).clamp(11.0, 13.0),
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.05,
-                                        height: 1.18,
-                                        color: Colors.white.withOpacity(0.76),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
+                          await ctrl.connect();
+                        },
                       ),
 
                       SizedBox(height: gapL),
@@ -497,98 +410,6 @@ class AdaptiveText extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-/// ============================================================
-/// BIG Connect Button
-/// ============================================================
-class _BigConnectButton extends StatelessWidget {
-  final double width;
-  final double height;
-  final bool isConnected;
-  final bool isBusy;
-  final Color color;
-  final double minText;
-  final double maxText;
-  final VoidCallback onTap;
-
-  const _BigConnectButton({
-    required this.width,
-    required this.height,
-    required this.isConnected,
-    required this.isBusy,
-    required this.color,
-    required this.minText,
-    required this.maxText,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final label = isConnected ? 'Отключить' : 'Подключить';
-
-    return SizedBox(
-      width: width,
-      height: height,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: isBusy ? null : onTap,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(18),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(18),
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    color.withOpacity(0.28),
-                    Colors.white.withOpacity(0.06),
-                  ],
-                ),
-                border: Border.all(color: color.withOpacity(0.55)),
-                boxShadow: [
-                  BoxShadow(
-                    color: color.withOpacity(0.22),
-                    blurRadius: 22,
-                    spreadRadius: 1,
-                  ),
-                ],
-              ),
-              child: Center(
-                child: isBusy
-                    ? SizedBox(
-                        width: height * 0.34,
-                        height: height * 0.34,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.6,
-                          valueColor: AlwaysStoppedAnimation<Color>(color),
-                        ),
-                      )
-                    : Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 10),
-                        child: AdaptiveText(
-                          label,
-                          maxLines: 1,
-                          minFontSize: minText,
-                          maxFontSize: maxText,
-                          align: TextAlign.center,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.15,
-                            height: 1.0,
-                          ),
-                        ),
-                      ),
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
@@ -859,80 +680,6 @@ class _GlassCard extends StatelessWidget {
           child: child,
         ),
       ),
-    );
-  }
-}
-
-/// ============================================================
-/// BT orb
-/// ============================================================
-class _BtStatusOrb extends StatelessWidget {
-  final double size;
-  final bool isConnected;
-  final bool isBusy;
-
-  const _BtStatusOrb({
-    required this.size,
-    required this.isConnected,
-    required this.isBusy,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const good = Colors.white;
-    const bad = Color(0xFF6E6E6E);
-    final c = isConnected ? good : bad;
-
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: c.withOpacity(0.48),
-                blurRadius: 22,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-        ),
-        ClipOval(
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-            child: Container(
-              width: size,
-              height: size,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withOpacity(0.06),
-                border: Border.all(color: Colors.white.withOpacity(0.12)),
-              ),
-              child: Center(
-                child: isBusy
-                    ? SizedBox(
-                        width: size * 0.40,
-                        height: size * 0.40,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.4,
-                          valueColor: AlwaysStoppedAnimation<Color>(c),
-                        ),
-                      )
-                    : Icon(
-                        isConnected
-                            ? Icons.wifi_rounded
-                            : Icons.wifi_off_rounded,
-                        size: size * 0.45,
-                        color: c,
-                      ),
-              ),
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -1501,6 +1248,196 @@ class _QuickSheet extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// Status Panel (такой же, как на втором экране)
+/// ============================================================
+class _StatusPanel extends StatelessWidget {
+  final double uiScale;
+  final WifiConnectionState wifi;
+  final int batteryPercent;
+  final VoidCallback onToggle;
+
+  const _StatusPanel({
+    required this.uiScale,
+    required this.wifi,
+    required this.batteryPercent,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * uiScale;
+    // Черно-белая цветовая схема
+    const accentWhite = Colors.white;
+    const accentGray = Color(0xFF6E6E6E);
+    final accent = wifi.isConnected ? accentWhite : accentGray;
+
+    String statusText;
+    if (wifi.isConnecting) {
+      statusText = 'Подключение…';
+    } else if (wifi.isConnected) {
+      statusText = 'Подключено';
+    } else if (!wifi.isWifi) {
+      statusText = 'Подключитесь к Wi-Fi робота';
+    } else {
+      statusText = 'Не подключено';
+    }
+
+    return _GlassCard(
+      borderColor: accent.withOpacity(0.32),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: u(12).clamp(10.0, 12.0),
+          vertical: u(10).clamp(8.0, 10.0),
+        ),
+        child: Row(
+          children: [
+            _BatteryChip(uiScale: uiScale, percent: batteryPercent),
+            SizedBox(width: u(10)),
+            Expanded(
+              child: Row(
+                children: [
+                  Icon(
+                    wifi.isConnected
+                        ? Icons.wifi_rounded
+                        : Icons.wifi_off_rounded,
+                    color: accent,
+                    size: u(18).clamp(16.0, 18.0),
+                  ),
+                  SizedBox(width: u(8)),
+                  Expanded(
+                    child: Text(
+                      statusText,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: u(11.5).clamp(10.5, 11.5),
+                      ),
+                      maxLines: 2,
+                      softWrap: true,
+                      overflow: TextOverflow.visible,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(width: u(10)),
+            _ConnectBtn(
+              uiScale: uiScale,
+              accent: accent,
+              busy: wifi.isConnecting,
+              isConnected: wifi.isConnected,
+              onTap: onToggle,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BatteryChip extends StatelessWidget {
+  final double uiScale;
+  final int percent;
+  const _BatteryChip({required this.uiScale, required this.percent});
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * uiScale;
+    final p = percent.clamp(0, 100);
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: u(10).clamp(8.0, 10.0),
+        vertical: u(8).clamp(6.0, 8.0),
+      ),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        color: Colors.white.withOpacity(0.05),
+        border: Border.all(color: Colors.white.withOpacity(0.10)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.battery_full_rounded,
+              size: u(18).clamp(16.0, 18.0),
+              color: Colors.white.withOpacity(0.88)),
+          SizedBox(width: u(6)),
+          Text('$p%',
+              style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: u(12.5).clamp(11.0, 12.5))),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConnectBtn extends StatelessWidget {
+  final double uiScale;
+  final Color accent;
+  final bool busy;
+  final bool isConnected;
+  final VoidCallback onTap;
+
+  const _ConnectBtn({
+    required this.uiScale,
+    required this.accent,
+    required this.busy,
+    required this.isConnected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * uiScale;
+    final label = isConnected ? 'Отключить' : 'Подключить';
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: busy ? null : onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: u(12).clamp(10.0, 12.0),
+              vertical: u(10).clamp(8.0, 10.0),
+            ),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  accent.withOpacity(0.26),
+                  Colors.white.withOpacity(0.05)
+                ],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: accent.withOpacity(0.45)),
+            ),
+            child: busy
+                ? SizedBox(
+                    width: u(14).clamp(12.0, 14.0),
+                    height: u(14).clamp(12.0, 14.0),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(accent),
+                    ),
+                  )
+                : Text(
+                    label,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: u(12.0).clamp(10.8, 12.0),
+                    ),
+                  ),
           ),
         ),
       ),

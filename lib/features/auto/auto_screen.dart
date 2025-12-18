@@ -112,7 +112,7 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    wifi.isBusy || wifi.isConnecting
+                                    wifi.isConnecting
                                         ? 'Подключение…'
                                         : (wifi.isConnected
                                             ? 'Подключено'
@@ -125,8 +125,8 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                   const SizedBox(height: 4),
                                   Text(
                                     wifi.isConnected
-                                        ? wifi.deviceName
-                                        : (wifi.isWifiOk
+                                        ? 'Робот подключен'
+                                        : (wifi.isWifi
                                             ? 'Подключите робота для автоматического режима'
                                             : 'Подключитесь к Wi-Fi робота'),
                                     style: TextStyle(
@@ -143,7 +143,7 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                             const SizedBox(width: 10),
                             InkWell(
                               borderRadius: BorderRadius.circular(16),
-                              onTap: (wifi.isBusy || wifi.isConnecting)
+                              onTap: wifi.isConnecting
                                   ? null
                                   : _toggleWifiConnection,
                               child: ClipRRect(
@@ -169,7 +169,7 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                       border: Border.all(
                                           color: accent.withOpacity(0.45)),
                                     ),
-                                    child: (wifi.isBusy || wifi.isConnecting)
+                                    child: wifi.isConnecting
                                         ? const SizedBox(
                                             width: 16,
                                             height: 16,

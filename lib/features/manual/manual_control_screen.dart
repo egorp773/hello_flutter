@@ -72,7 +72,7 @@ class NoticeController extends StateNotifier<NoticeState?> {
 }
 
 /// ============================================================================
-/// Terminal mock (потом заменим на реальный BLE UART)
+/// Terminal - использует логи из wifiConnectionProvider
 /// ============================================================================
 @immutable
 class TerminalState {
@@ -87,21 +87,28 @@ final terminalProvider =
 
 class TerminalController extends StateNotifier<TerminalState> {
   final Ref ref;
-  TerminalController(this.ref) : super(const TerminalState([]));
+  TerminalController(this.ref) : super(const TerminalState([])) {
+    // Следим за логами из wifiConnectionProvider
+    ref.listen(wifiConnectionProvider, (prev, next) {
+      if (prev?.rxLog != next.rxLog) {
+        state = TerminalState(next.rxLog);
+      }
+    });
+  }
 
   /// Отправка реальной команды в WebSocket терминал.
   Future<void> send(String text) async {
     final t = text.trim();
     if (t.isEmpty) return;
 
-    // Локально показываем исходящую строку
-    state = TerminalState([...state.lines, '→ $t']);
-
     // Реальная отправка через WifiConnectionController
-    await ref.read(wifiConnectionProvider.notifier).sendRaw(t);
+    ref.read(wifiConnectionProvider.notifier).sendRaw(t);
   }
 
-  void clear() => state = const TerminalState([]);
+  void clear() {
+    // Очистка логов в wifiConnectionProvider
+    ref.read(wifiConnectionProvider.notifier).clearLog();
+  }
 }
 
 /// ============================================================================
@@ -419,10 +426,10 @@ class KindMeta {
   });
 }
 
-// Черно-белая цветовая схема
-const _kNeon = Colors.white;
-const _kGood = Colors.white;
-const _kBad = Color(0xFF6E6E6E);
+// Цветовая схема для модификаторов и путей
+const _kNeon = Color(0xFF3DE7FF); // Неоновый голубой для переходов
+const _kGood = Color(0xFF38F6A7); // Зеленый для зон уборки
+const _kBad = Color(0xFFFF4D6D); // Красный для запретных зон
 
 const List<KindMeta> kKinds = [
   KindMeta(
@@ -802,7 +809,7 @@ class _ControlsArea extends ConsumerWidget {
             _PrimaryBtn(
               uiScale: uiScale,
               text: 'Стоп',
-              color: _kBad,
+              color: Color(0xFF6E6E6E),
               enabled: true,
               onTap: onStop,
             ),
@@ -832,7 +839,7 @@ class _ControlsArea extends ConsumerWidget {
             _PrimaryBtn(
               uiScale: uiScale,
               text: 'Старт',
-              color: _kNeon,
+              color: Colors.white,
               enabled: true,
               // ✅ если уже есть имя+режим (например после Модификаторов) — стартуем сразу
               onTap: (mapName != null && kind != null)
@@ -896,7 +903,7 @@ class _VerticalActionsPanel extends StatelessWidget {
       final btnH = ((h - 2 * gap) / 3).clamp(34.0, 56.0);
 
       return _GlassCard(
-        borderColor: _kNeon.withOpacity(0.18),
+        borderColor: Colors.white.withOpacity(0.18),
         child: Padding(
           padding: EdgeInsets.all(pad),
           child: Column(
@@ -918,7 +925,7 @@ class _VerticalActionsPanel extends StatelessWidget {
               _PrimaryBtn(
                 uiScale: uiScale,
                 text: 'Сохранить',
-                color: _kGood,
+                color: Colors.white,
                 enabled: true,
                 onTap: onSave,
               ),
@@ -1083,7 +1090,7 @@ class _AnalogJoystickState extends State<_AnalogJoystick>
                   offset: _knob,
                   child: _JoyKnob(
                     color: widget.enabled
-                        ? _kNeon
+                        ? Colors.white
                         : Colors.white.withOpacity(0.25),
                   ),
                 ),
@@ -1194,7 +1201,7 @@ class _ArrowControls extends ConsumerWidget {
                   size: btnSize,
                   icon: Icons.keyboard_arrow_up_rounded,
                   enabled: enabled,
-                  color: _kGood,
+                  color: Colors.white,
                   onPressed: () {
                     // Вперёд: M,50,50
                     ref.read(wifiConnectionProvider.notifier).sendMove(50, 50);
@@ -1212,7 +1219,7 @@ class _ArrowControls extends ConsumerWidget {
                       size: btnSize,
                       icon: Icons.keyboard_arrow_left_rounded,
                       enabled: enabled,
-                      color: _kNeon,
+                      color: Colors.white,
                       onPressed: () {
                         // Влево (поворот на месте): M,-50,50
                         ref
@@ -1228,7 +1235,7 @@ class _ArrowControls extends ConsumerWidget {
                       size: btnSize,
                       icon: Icons.stop_rounded,
                       enabled: enabled,
-                      color: _kBad,
+                      color: Color(0xFF6E6E6E),
                       onPressed: () {
                         ref.read(wifiConnectionProvider.notifier).sendStop();
                       },
@@ -1238,7 +1245,7 @@ class _ArrowControls extends ConsumerWidget {
                       size: btnSize,
                       icon: Icons.keyboard_arrow_right_rounded,
                       enabled: enabled,
-                      color: _kNeon,
+                      color: Colors.white,
                       onPressed: () {
                         // Вправо (поворот на месте): M,50,-50
                         ref
@@ -1257,7 +1264,7 @@ class _ArrowControls extends ConsumerWidget {
                   size: btnSize,
                   icon: Icons.keyboard_arrow_down_rounded,
                   enabled: enabled,
-                  color: _kBad,
+                  color: Color(0xFF6E6E6E),
                   onPressed: () {
                     // Назад: M,-50,-50
                     ref
@@ -1403,14 +1410,16 @@ class _StatusPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     double u(double v) => v * uiScale;
-    final accent = wifi.isConnected ? _kGood : _kBad;
+    // Серые оттенки для UI, но статус подключения может быть цветным
+    const accentGray = Color(0xFF6E6E6E);
+    final accent = wifi.isConnected ? Colors.white : accentGray;
 
     String statusText;
-    if (wifi.isBusy || wifi.isConnecting) {
+    if (wifi.isConnecting) {
       statusText = 'Подключение…';
     } else if (wifi.isConnected) {
       statusText = 'Подключено';
-    } else if (!wifi.isWifiOk) {
+    } else if (!wifi.isWifi) {
       statusText = 'Подключитесь к Wi-Fi робота';
     } else {
       statusText = 'Не подключено';
@@ -1457,7 +1466,7 @@ class _StatusPanel extends StatelessWidget {
             _ConnectBtn(
               uiScale: uiScale,
               accent: accent,
-              busy: wifi.isBusy || wifi.isConnecting,
+              busy: wifi.isConnecting,
               isConnected: wifi.isConnected,
               onTap: onToggle,
             ),
@@ -1600,7 +1609,7 @@ class _MapCard extends StatelessWidget {
     final pad = u(12).clamp(10.0, 12.0);
 
     return _GlassCard(
-      borderColor: _kNeon.withOpacity(0.16),
+      borderColor: Colors.white.withOpacity(0.16),
       child: Padding(
         padding: EdgeInsets.all(pad),
         child: ClipRRect(
@@ -2070,7 +2079,7 @@ class _SpeedSettingsSheet extends ConsumerWidget {
           children: [
             // Режим управления
             _GlassCard(
-              borderColor: _kNeon.withOpacity(0.18),
+              borderColor: Colors.white.withOpacity(0.18),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -2078,7 +2087,7 @@ class _SpeedSettingsSheet extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.gamepad_rounded, color: _kNeon),
+                        const Icon(Icons.gamepad_rounded, color: Colors.white),
                         const SizedBox(width: 10),
                         const Expanded(
                           child: Text(
@@ -2121,7 +2130,7 @@ class _SpeedSettingsSheet extends ConsumerWidget {
             const SizedBox(height: 10),
             // Скорость движения
             _GlassCard(
-              borderColor: _kNeon.withOpacity(0.18),
+              borderColor: Colors.white.withOpacity(0.18),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(
@@ -2129,7 +2138,7 @@ class _SpeedSettingsSheet extends ConsumerWidget {
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.speed_rounded, color: _kNeon),
+                        const Icon(Icons.speed_rounded, color: Colors.white),
                         const SizedBox(width: 10),
                         const Expanded(
                           child: Text(
@@ -2149,10 +2158,10 @@ class _SpeedSettingsSheet extends ConsumerWidget {
                     const SizedBox(height: 10),
                     SliderTheme(
                       data: SliderTheme.of(context).copyWith(
-                        activeTrackColor: _kNeon,
+                        activeTrackColor: Colors.white,
                         inactiveTrackColor: Colors.white.withOpacity(0.12),
-                        thumbColor: _kNeon,
-                        overlayColor: _kNeon.withOpacity(0.14),
+                        thumbColor: Colors.white,
+                        overlayColor: Colors.white.withOpacity(0.14),
                         trackHeight: 3.2,
                       ),
                       child: Slider(
@@ -2220,14 +2229,14 @@ class _ModeOption extends StatelessWidget {
           color: Colors.white.withOpacity(selected ? 0.10 : 0.05),
           border: Border.all(
             color: selected
-                ? _kNeon.withOpacity(0.45)
+                ? Colors.white.withOpacity(0.45)
                 : Colors.white.withOpacity(0.10),
           ),
         ),
         child: Column(
           children: [
             Icon(icon,
-                color: selected ? _kNeon : Colors.white.withOpacity(0.6),
+                color: selected ? Colors.white : Colors.white.withOpacity(0.6),
                 size: 28),
             const SizedBox(height: 8),
             Text(
@@ -2337,7 +2346,7 @@ class _TerminalSheetState extends ConsumerState<_TerminalSheet> {
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(16),
-                            borderSide: const BorderSide(color: _kNeon),
+                            borderSide: const BorderSide(color: Colors.white),
                           ),
                         ),
                       ),
@@ -2416,7 +2425,7 @@ class _GlassSheet extends StatelessWidget {
           decoration: BoxDecoration(
             color: Colors.white.withOpacity(0.07),
             borderRadius: BorderRadius.circular(26),
-            border: Border.all(color: _kNeon.withOpacity(0.22)),
+            border: Border.all(color: Colors.white.withOpacity(0.22)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2432,7 +2441,7 @@ class _GlassSheet extends StatelessWidget {
               const SizedBox(height: 14),
               Row(
                 children: [
-                  const Icon(Icons.layers_rounded, color: _kNeon),
+                  const Icon(Icons.layers_rounded, color: Colors.white),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(title,
@@ -2482,7 +2491,8 @@ class _IconBtn extends StatelessWidget {
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: Colors.white.withOpacity(0.10)),
             ),
-            child: Icon(icon, color: _kNeon, size: u(20).clamp(18.0, 20.0)),
+            child:
+                Icon(icon, color: Colors.white, size: u(20).clamp(18.0, 20.0)),
           ),
         ),
       ),
@@ -2738,7 +2748,8 @@ class _PremiumBG extends StatelessWidget {
     const bg1 = Color(0xFF1A1A1A);
     const bg2 = Color(0xFF2A2A2A);
 
-    final tint = isConnected ? _kGood : _kBad;
+    // Серый оттенок вместо цветного
+    const tintGray = Color(0xFF6E6E6E);
 
     return Stack(
       children: [
@@ -2781,7 +2792,7 @@ class _PremiumBG extends StatelessWidget {
                 gradient: RadialGradient(
                   center: const Alignment(0.62, 0.40),
                   radius: 1.30,
-                  colors: [tint, Colors.transparent],
+                  colors: [tintGray, Colors.transparent],
                   stops: const [0.0, 1.0],
                 ),
               ),
