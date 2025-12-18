@@ -1284,8 +1284,8 @@ class _StatusPanel extends StatelessWidget {
       statusText = 'Подключение…';
     } else if (wifi.isConnected) {
       statusText = 'Подключено';
-    } else if (!wifi.isWifi) {
-      statusText = 'Подключитесь к Wi-Fi робота';
+    } else if (wifi.error != null) {
+      statusText = wifi.error!;
     } else {
       statusText = 'Не подключено';
     }

@@ -126,9 +126,9 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                                   Text(
                                     wifi.isConnected
                                         ? 'Робот подключен'
-                                        : (wifi.isWifi
-                                            ? 'Подключите робота для автоматического режима'
-                                            : 'Подключитесь к Wi-Fi робота'),
+                                        : (wifi.error != null
+                                            ? wifi.error!
+                                            : 'Подключите робота для автоматического режима'),
                                     style: TextStyle(
                                       fontWeight: FontWeight.w700,
                                       fontSize: 12,

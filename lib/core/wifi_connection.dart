@@ -1,253 +1,180 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:convert';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:web_socket_channel/io.dart';
+import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class WifiConnectionState {
-  final bool isWifi;
   final bool isConnecting;
   final bool isConnected;
   final String? error;
   final List<String> rxLog;
 
   const WifiConnectionState({
-    required this.isWifi,
     required this.isConnecting,
     required this.isConnected,
-    this.error,
-    this.rxLog = const [],
+    required this.error,
+    required this.rxLog,
   });
 
+  factory WifiConnectionState.initial() => const WifiConnectionState(
+        isConnecting: false,
+        isConnected: false,
+        error: null,
+        rxLog: <String>[],
+      );
+
   WifiConnectionState copyWith({
-    bool? isWifi,
     bool? isConnecting,
     bool? isConnected,
     String? error,
     List<String>? rxLog,
   }) {
     return WifiConnectionState(
-      isWifi: isWifi ?? this.isWifi,
       isConnecting: isConnecting ?? this.isConnecting,
       isConnected: isConnected ?? this.isConnected,
       error: error,
       rxLog: rxLog ?? this.rxLog,
     );
   }
-
-  static const initial = WifiConnectionState(
-    isWifi: false,
-    isConnecting: false,
-    isConnected: false,
-    error: null,
-    rxLog: [],
-  );
 }
 
 final wifiConnectionProvider =
-    StateNotifierProvider<WifiConnectionController, WifiConnectionState>(
-  (ref) => WifiConnectionController(),
+    StateNotifierProvider<WifiConnectionNotifier, WifiConnectionState>(
+  (ref) => WifiConnectionNotifier(),
 );
 
-class WifiConnectionController extends StateNotifier<WifiConnectionState> {
-  WifiConnectionController() : super(WifiConnectionState.initial) {
-    _watchConnectivity();
-  }
+class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
+  WifiConnectionNotifier() : super(WifiConnectionState.initial());
 
-  final _connectivity = Connectivity();
-  StreamSubscription? _connSub;
+  static const String _host = "192.168.4.1";
+  static const int _port = 81;
 
   WebSocketChannel? _channel;
-  StreamSubscription? _wsSub;
+  StreamSubscription? _sub;
 
-  // Хост твоего ESP32 AP
-  final String host = "192.168.4.1";
-  final int port = 81;
-  final String path = "/ws";
+  Completer<void>? _pongWaiter;
 
-  // очередь команд, если отправили чуть раньше соединения
-  final List<String> _queue = [];
+  Uri get _pingUri => Uri.parse("http://$_host:$_port/ping");
+  Uri get _wsUri => Uri.parse("ws://$_host:$_port/ws");
 
-  void _log(String s) {
-    final next = [...state.rxLog, s];
-    state = state.copyWith(
-        rxLog: next.length > 200 ? next.sublist(next.length - 200) : next);
+  void _log(String line) {
+    final next = List<String>.from(state.rxLog);
+    next.add(line);
+    if (next.length > 200) next.removeRange(0, next.length - 200);
+    state = state.copyWith(rxLog: next);
   }
 
-  Future<void> _watchConnectivity() async {
-    final first = await _connectivity.checkConnectivity();
-    state = state.copyWith(isWifi: first.contains(ConnectivityResult.wifi));
-
-    _connSub = _connectivity.onConnectivityChanged.listen((res) {
-      final isWifi = res.contains(ConnectivityResult.wifi);
-      state = state.copyWith(isWifi: isWifi);
-
-      // если Wi-Fi пропал — рвём соединение
-      if (!isWifi && state.isConnected) {
-        disconnect();
-      }
-    });
+  Future<bool> _ping() async {
+    try {
+      _log("→ GET $_pingUri");
+      final r = await http.get(_pingUri).timeout(const Duration(seconds: 2));
+      _log("← /ping ${r.statusCode}: ${r.body}");
+      return r.statusCode == 200 && r.body.toUpperCase().contains("OK");
+    } catch (e) {
+      _log("× /ping error: $e");
+      return false;
+    }
   }
-
-  Uri get wsUri => Uri.parse("ws://$host:$port$path");
 
   Future<void> connect() async {
-    if (state.isConnecting) return;
-
-    // Главное: НЕ проверяем SSID. Только факт Wi-Fi.
-    if (!state.isWifi) {
-      state =
-          state.copyWith(error: "Телефон не в Wi-Fi. Подключись к сети Robot.");
-      return;
-    }
+    if (state.isConnecting || state.isConnected) return;
 
     state = state.copyWith(isConnecting: true, error: null);
+    _log("=== CONNECT START ===");
+
+    final ok = await _ping();
+    if (!ok) {
+      state = state.copyWith(
+        isConnecting: false,
+        isConnected: false,
+        error:
+            "Не вижу робота по Wi-Fi. Проверь что iPhone/Android подключён к сети Robot и открой /ping.",
+      );
+      _log("=== CONNECT FAIL: ping ===");
+      return;
+    }
 
     try {
-      // таймаут на коннект
-      final socket = await WebSocket.connect(wsUri.toString()).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => throw TimeoutException("WebSocket connect timeout"),
+      _log("→ WS connect $_wsUri");
+      final ch = WebSocketChannel.connect(_wsUri);
+      // важно: дождаться готовности (если сервер недоступен — тут упадёт)
+      await ch.ready.timeout(const Duration(seconds: 3));
+
+      _channel = ch;
+
+      _sub?.cancel();
+      _sub = ch.stream.listen(
+        (msg) {
+          _log("← $msg");
+          if (msg.toString().trim().toUpperCase() == "PONG") {
+            _pongWaiter?.complete();
+            _pongWaiter = null;
+          }
+        },
+        onError: (e) {
+          _log("× WS error: $e");
+          disconnect(error: "WebSocket ошибка: $e");
+        },
+        onDone: () {
+          _log("× WS closed");
+          disconnect(error: "WebSocket закрыт");
+        },
       );
 
-      _channel = IOWebSocketChannel(socket);
-      _log("✓ WS connected: $wsUri");
+      // финальная проверка: PING/PONG
+      _pongWaiter = Completer<void>();
+      sendRaw("PING");
 
-      // слушаем входящие
-      _wsSub?.cancel();
-      _wsSub = _channel!.stream.listen((event) {
-        final msg = event.toString();
-        _log("← $msg");
-        _onIncoming(msg);
-      }, onError: (e) {
-        state = state.copyWith(
-            error: "WS error: $e", isConnected: false, isConnecting: false);
-      }, onDone: () {
-        state = state.copyWith(isConnected: false, isConnecting: false);
-        _log("× WS closed");
-      });
-
-      // рукопожатие
-      final ok = await _handshake();
-      if (!ok) {
-        await disconnect();
-        state =
-            state.copyWith(error: "Робот не ответил на handshake (PING/PONG).");
-        return;
-      }
-
+      await _pongWaiter!.future.timeout(const Duration(seconds: 2));
       state =
-          state.copyWith(isConnected: true, isConnecting: false, error: null);
-      _log("✓ Handshake OK. CONNECTED.");
-
-      // слить очередь
-      for (final cmd in _queue) {
-        _sendRaw(cmd);
-      }
-      _queue.clear();
+          state.copyWith(isConnecting: false, isConnected: true, error: null);
+      _log("=== CONNECT OK ===");
     } catch (e) {
-      state = state.copyWith(
-          isConnecting: false, isConnected: false, error: e.toString());
+      _log("=== CONNECT FAIL: $e ===");
+      await disconnect(error: "Не удалось подключиться по WebSocket: $e");
     }
   }
 
-  Future<bool> _handshake() async {
-    // Ждём PONG/OK максимум 2 сек
-    final completer = Completer<bool>();
-    late final Timer timer;
+  Future<void> disconnect({String? error}) async {
+    state =
+        state.copyWith(isConnecting: false, isConnected: false, error: error);
 
-    void handler(String msg) {
-      final m = msg.trim().toUpperCase();
-      if (m == "PONG" || m.startsWith("PONG") || m == "OK") {
-        if (!completer.isCompleted) completer.complete(true);
-      }
-    }
+    _pongWaiter = null;
 
-    // временный “перехват” через логический обработчик
-    _tempIncomingHandler = handler;
+    await _sub?.cancel();
+    _sub = null;
 
-    timer = Timer(const Duration(seconds: 2), () {
-      if (!completer.isCompleted) completer.complete(false);
-    });
-
-    _sendRaw("PING");
-    final ok = await completer.future;
-    timer.cancel();
-    _tempIncomingHandler = null;
-    return ok;
-  }
-
-  void _sendRaw(String text) {
-    _channel?.sink.add(text);
-    _log("→ $text");
-  }
-
-  // Публичный метод для терминала
-  void sendRaw(String text) {
-    final t = text.trim();
-    if (t.isEmpty) return;
-
-    if (!state.isConnected) {
-      _queue.add(t);
-      return;
-    }
-    _sendRaw(t);
-  }
-
-  Future<void> disconnect() async {
-    state = state.copyWith(isConnecting: false, isConnected: false);
     try {
-      await _wsSub?.cancel();
-      await _channel?.sink.close();
+      _channel?.sink.close();
     } catch (_) {}
-    _wsSub = null;
+
     _channel = null;
-    _log("× Disconnected");
+    _log("=== DISCONNECTED ===");
   }
 
-  // ====== команды управления ======
-  void sendMove(int left, int right) {
-    final l = left.clamp(-100, 100);
-    final r = right.clamp(-100, 100);
-    final cmd = "M,$l,$r";
+  void sendRaw(String text) {
+    final ch = _channel;
+    if (ch == null) return;
+    _log("→ $text");
+    ch.sink.add(text);
+  }
 
-    if (!state.isConnected) {
-      _queue.add(cmd); // чтобы не терять команды
-      return;
-    }
-    _sendRaw(cmd);
+  /// left/right: -100..100
+  void sendMove(int left, int right) {
+    if (!state.isConnected) return;
+    left = left.clamp(-100, 100);
+    right = right.clamp(-100, 100);
+    sendRaw("M,$left,$right");
   }
 
   void sendStop() {
-    const cmd = "STOP";
-    if (!state.isConnected) {
-      _queue.add(cmd);
-      return;
-    }
-    _sendRaw(cmd);
-  }
-
-  // ====== входящие ======
-  void Function(String msg)? _tempIncomingHandler;
-
-  void _onIncoming(String msg) {
-    _tempIncomingHandler?.call(msg);
-
-    // тут можешь парсить телеметрию
-    // например JSON: {"bat":30,"gps":1}
-    // try { final j=jsonDecode(msg); ... } catch (_) {}
+    if (!state.isConnected) return;
+    sendRaw("STOP");
   }
 
   void clearLog() {
     state = state.copyWith(rxLog: []);
-  }
-
-  @override
-  void dispose() {
-    _connSub?.cancel();
-    disconnect();
-    super.dispose();
   }
 }
