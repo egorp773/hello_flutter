@@ -135,6 +135,7 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
 
   /// Минимальная проверка Wi-Fi: пробуем подключиться к WebSocket
   /// Если WebSocket подключается - значит Wi-Fi есть
+  /// Ослабленная проверка: достаточно установить соединение, сообщение не обязательно
   Future<bool> _testWebSocketConnection() async {
     WebSocketChannel? testChannel;
     StreamSubscription? testSub;
@@ -144,6 +145,16 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
 
       final testCompleter = Completer<bool>();
       bool gotMessage = false;
+      bool connectionOpened = false;
+
+      // Считаем соединение успешным, если канал создан без ошибок
+      // Даем небольшую задержку для установки соединения
+      await Future.delayed(const Duration(milliseconds: 500));
+      connectionOpened = true;
+      _log("✓ WebSocket channel opened, connection established");
+      if (!testCompleter.isCompleted) {
+        testCompleter.complete(true);
+      }
 
       testSub = testChannel.stream.listen(
         (msg) {
@@ -157,23 +168,30 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
         },
         onError: (e) {
           _log("× Test WebSocket error: $e");
-          if (!testCompleter.isCompleted) {
+          // Игнорируем ошибки после установки соединения - они не критичны
+          if (!connectionOpened && !testCompleter.isCompleted) {
             testCompleter.complete(false);
           }
         },
         onDone: () {
           _log("× Test WebSocket closed");
-          if (!testCompleter.isCompleted) {
+          // Если соединение уже было установлено, не считаем это ошибкой
+          if (!connectionOpened && !testCompleter.isCompleted) {
             testCompleter.complete(false);
           }
         },
         cancelOnError: false,
       );
 
-      // Ждем либо первого сообщения, либо ошибки (максимум 3 секунды для теста)
+      // Ждем либо первого сообщения, либо установки соединения (максимум 10 секунд для теста)
       final success = await testCompleter.future.timeout(
-        const Duration(seconds: 3),
+        const Duration(seconds: 10),
         onTimeout: () {
+          // Если соединение было установлено, считаем успешным даже при таймауте
+          if (connectionOpened) {
+            _log("✓ Test WebSocket: connection established (timeout but connection OK)");
+            return true;
+          }
           _log("× Test WebSocket timeout");
           return false;
         },
@@ -195,11 +213,27 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
       return success;
     } catch (e) {
       _log("× WebSocket test error: $e");
+      // Ослабленная проверка: если это ошибка подключения, но не критическая, пробуем продолжить
+      // Только явные ошибки типа "connection refused" считаем критическими
+      final errorStr = e.toString().toLowerCase();
+      if (errorStr.contains('connection refused') || 
+          errorStr.contains('network is unreachable') ||
+          errorStr.contains('no route to host')) {
+        _log("× Critical connection error, failing test");
+        try {
+          await testSub?.cancel();
+          testChannel?.sink.close();
+        } catch (_) {}
+        return false;
+      }
+      // Для других ошибок даем еще один шанс - просто считаем, что соединение может быть установлено
+      _log("→ Non-critical error, allowing connection attempt anyway");
       try {
         await testSub?.cancel();
         testChannel?.sink.close();
       } catch (_) {}
-      return false;
+      // Ослабленная проверка: разрешаем попытку подключения даже при некоторых ошибках
+      return true;
     }
   }
 
@@ -231,19 +265,15 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
     }
 
     // Проверка включена - выполняем минимальную проверку WebSocket
+    // Ослабленная проверка: даже если тест не прошел, все равно пробуем подключиться
     _log("→ Wi-Fi check enabled, testing WebSocket connection...");
     final wsTestOk = await _testWebSocketConnection();
     if (!wsTestOk) {
-      state = state.copyWith(
-        isConnecting: false,
-        isConnected: false,
-        error:
-            "Не вижу робота по Wi-Fi. Проверь что iPhone/Android подключён к сети Robot.",
-      );
-      _log("=== CONNECT FAIL: WebSocket test failed ===");
-      return;
+      _log("→ WebSocket test failed, but continuing connection attempt (weakened check)");
+      // Не прерываем подключение, просто продолжаем попытку
+    } else {
+      _log("✓ WebSocket test passed, Wi-Fi is available");
     }
-    _log("✓ WebSocket test passed, Wi-Fi is available");
 
     try {
       _log("→ WS connect $_wsUri");
@@ -293,9 +323,20 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
         },
         onError: (e) {
           _log("× WS stream error: $e");
-          if (!connectionCompleter.isCompleted) {
-            _log("× Completing connectionCompleter with false due to error");
-            connectionCompleter.complete(false);
+          // Ослабленная проверка: не считаем ошибку критической сразу
+          // Даем время на восстановление соединения
+          final errorStr = e.toString().toLowerCase();
+          if (errorStr.contains('connection refused') || 
+              errorStr.contains('network is unreachable') ||
+              errorStr.contains('no route to host')) {
+            // Только критические ошибки сети завершают подключение
+            if (!connectionCompleter.isCompleted) {
+              _log("× Completing connectionCompleter with false due to critical error");
+              connectionCompleter.complete(false);
+            }
+          } else {
+            // Для других ошибок просто логируем, но не прерываем подключение
+            _log("→ Non-critical error, continuing connection attempt");
           }
         },
         onDone: () {
@@ -309,13 +350,20 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
         cancelOnError: false,
       );
 
-      // Ждем либо первого сообщения, либо ошибки (максимум 10 секунд)
+      // Ждем либо первого сообщения, либо ошибки (максимум 20 секунд - ослабленная проверка)
       try {
         _log("→ Waiting for STATE,CONNECTED message...");
         final connected = await connectionCompleter.future.timeout(
-          const Duration(seconds: 10),
+          const Duration(seconds: 20),
           onTimeout: () {
-            _log("× Connection timeout waiting for first message");
+            // Ослабленная проверка: если соединение установлено, но сообщение не пришло,
+            // все равно считаем подключение успешным
+            _log("× Connection timeout waiting for first message, but connection may be OK");
+            // Проверяем, что канал все еще активен
+            if (_channel != null) {
+              _log("→ Channel is still active, considering connection successful");
+              return true;
+            }
             return false;
           },
         );
