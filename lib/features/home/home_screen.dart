@@ -1255,6 +1255,7 @@ class _QuickSheet extends StatelessWidget {
                   child: _WhiteGlassButton(
                     text: 'Закрыть',
                     onPressed: () => Navigator.pop(context),
+                    isSecondary: false,
                   ),
                 ),
               ],

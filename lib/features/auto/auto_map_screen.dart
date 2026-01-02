@@ -102,13 +102,35 @@ class _AutoMapScreenState extends ConsumerState<AutoMapScreen> {
     if (_mapState == null) return;
 
     // Реализуем алгоритм построения маршрута
-    final route = route_builder.RouteBuilder.buildRoute(_mapState!);
+    final (route, errorCode) =
+        route_builder.RouteBuilder.buildRoute(_mapState!);
 
     if (route.isEmpty) {
+      String errorMsg = 'Не удалось построить маршрут. Проверьте карту.';
+      if (errorCode != null) {
+        switch (errorCode) {
+          case route_builder.RouteErrorCode.noStart:
+            errorMsg = 'Стартовая точка не задана.';
+            break;
+          case route_builder.RouteErrorCode.noTransitions:
+            errorMsg = 'Нет синих полос (transitions) на карте.';
+            break;
+          case route_builder.RouteErrorCode.blueIntersectsForbidden:
+            errorMsg = 'Синяя полоса пересекает запрещенные зоны.';
+            break;
+          case route_builder.RouteErrorCode.startToBlueBlocked:
+            errorMsg = 'Стартовая точка недостижима до синей полосы.';
+            break;
+          case route_builder.RouteErrorCode.mowingFailed:
+            errorMsg =
+                'Не удалось построить маршрут уборки (нет доступных проходов).';
+            break;
+        }
+      }
       ref.read(noticeProvider.notifier).show(
-            const NoticeState(
+            NoticeState(
               title: 'Ошибка',
-              message: 'Не удалось построить маршрут. Проверьте карту.',
+              message: errorMsg,
               kind: NoticeKind.danger,
             ),
           );

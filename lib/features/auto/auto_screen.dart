@@ -224,16 +224,16 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                             ),
                             const SizedBox(width: 12),
                             const Expanded(
-                              child: Text(
+                        child: Text(
                                 'Выберите карту, на которой робот начнет уборку',
-                                style: TextStyle(
+                          style: TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w900,
                                   fontSize: 15,
                                   height: 1.2,
                                 ),
                               ),
-                            ),
+                          ),
                           ],
                         ),
                       ),
@@ -465,9 +465,9 @@ class _AutoScreenState extends ConsumerState<AutoScreen> {
                         '${notice.kind}-${notice.title}-${notice.message}'),
                     notice: notice,
                   ),
-                ),
               ),
             ),
+          ),
         ],
       ),
     );

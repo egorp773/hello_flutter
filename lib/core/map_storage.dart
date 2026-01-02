@@ -46,6 +46,8 @@ class MapStorage {
         'transitions': map.transitions
             .map((t) => t.map((p) => {'x': p.dx, 'y': p.dy}).toList())
             .toList(),
+        if (map.startPoint != null)
+          'startPoint': {'x': map.startPoint!.dx, 'y': map.startPoint!.dy},
         'savedAt': DateTime.now().toIso8601String(),
       };
 
@@ -85,6 +87,8 @@ class MapStorage {
       'transitions': map.transitions
           .map((t) => t.map((p) => {'x': p.dx, 'y': p.dy}).toList())
           .toList(),
+      if (map.startPoint != null)
+        'startPoint': {'x': map.startPoint!.dx, 'y': map.startPoint!.dy},
       'savedAt': DateTime.now().toIso8601String(),
     };
 
@@ -157,6 +161,15 @@ class MapStorage {
       }).toList();
     }).toList();
 
+    Offset? startPoint;
+    if (json['startPoint'] != null) {
+      final startPointJson = json['startPoint'] as Map<String, dynamic>;
+      startPoint = Offset(
+        (startPointJson['x'] as num).toDouble(),
+        (startPointJson['y'] as num).toDouble(),
+      );
+    }
+
     return ManualMapState(
       stage: ManualStage.idle,
       mapName: json['name'] as String?,
@@ -168,6 +181,7 @@ class MapStorage {
       forbiddens: forbiddens,
       transitions: transitions,
       stroke: const [],
+      startPoint: startPoint,
       mapId: json['id'] as String?,
     );
   }

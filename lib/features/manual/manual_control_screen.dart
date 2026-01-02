@@ -590,12 +590,12 @@ class ManualMapController extends StateNotifier<ManualMapState> {
           ));
     } else if (k == DrawKind.forbidden) {
       state = state.copyWith(forbiddens: [...state.forbiddens, PolyShape(pts)]);
-      state = state.copyWith(stage: ManualStage.completed, stroke: const []);
-      ref.read(noticeProvider.notifier).show(const NoticeState(
-            title: 'Готово',
-            message: 'Запись завершена.',
-            kind: NoticeKind.success,
-          ));
+    state = state.copyWith(stage: ManualStage.completed, stroke: const []);
+    ref.read(noticeProvider.notifier).show(const NoticeState(
+          title: 'Готово',
+          message: 'Запись завершена.',
+          kind: NoticeKind.success,
+        ));
     } else {
       // Transition завершен - автоматически начинаем зону уборки
       state = state.copyWith(transitions: [...state.transitions, pts]);
@@ -1485,7 +1485,7 @@ class _JoyKnob extends StatelessWidget {
 /// ============================================================================
 /// Управление стрелками (F/B/R/L/S)
 /// ============================================================================
-class _ArrowControls extends ConsumerWidget {
+class _ArrowControls extends ConsumerStatefulWidget {
   final double uiScale;
   final bool enabled;
   final double speedFactor;
@@ -1497,8 +1497,138 @@ class _ArrowControls extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    double u(double v) => v * uiScale;
+  ConsumerState<_ArrowControls> createState() => _ArrowControlsState();
+}
+
+class _ArrowControlsState extends ConsumerState<_ArrowControls> {
+  Timer? _moveTimer;
+  Timer? _positionUpdateTimer;
+  int? _currentLeft;
+  int? _currentRight;
+
+  @override
+  void dispose() {
+    _moveTimer?.cancel();
+    _positionUpdateTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startMoving(int left, int right) {
+    // Останавливаем предыдущее движение
+    _stopMoving();
+
+    if (!widget.enabled) return;
+
+    // Для стрелок не применяем speedFactor, используем полную скорость (уже увеличенную в 3 раза)
+    // Убеждаемся, что скорость не слишком мала (минимум 30 для движения)
+    var speedLeft = left;
+    var speedRight = right;
+
+    if (speedLeft.abs() < 30 && speedLeft != 0) {
+      speedLeft = speedLeft > 0 ? 30 : -30;
+    }
+    if (speedRight.abs() < 30 && speedRight != 0) {
+      speedRight = speedRight > 0 ? 30 : -30;
+    }
+
+    speedLeft = speedLeft.clamp(-100, 100);
+    speedRight = speedRight.clamp(-100, 100);
+
+    // Устанавливаем текущее направление
+    _currentLeft = speedLeft;
+    _currentRight = speedRight;
+
+    // Отправляем команду сразу
+    final wifi = ref.read(wifiConnectionProvider);
+    if (wifi.isConnected) {
+      ref.read(wifiConnectionProvider.notifier).sendMove(speedLeft, speedRight);
+    }
+
+    // Запускаем таймер для периодической отправки команд (каждые 100мс)
+    _moveTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      if (!mounted || !widget.enabled) {
+        timer.cancel();
+        _moveTimer = null;
+        return;
+      }
+      final wifi = ref.read(wifiConnectionProvider);
+      if (wifi.isConnected && _currentLeft != null && _currentRight != null) {
+        ref.read(wifiConnectionProvider.notifier).sendMove(
+              _currentLeft!,
+              _currentRight!,
+            );
+      } else {
+        timer.cancel();
+        _moveTimer = null;
+      }
+    });
+
+    // Запускаем таймер для обновления позиции робота на карте (каждые 50мс)
+    _positionUpdateTimer =
+        Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (!mounted || !widget.enabled) {
+        timer.cancel();
+        _positionUpdateTimer = null;
+        return;
+      }
+      if (_currentLeft != null && _currentRight != null) {
+        // Преобразуем команды left/right в направление движения на карте
+        // left и right - это скорости моторов от -100 до 100
+        final left = _currentLeft! / 100.0; // -1.0 до 1.0
+        final right = _currentRight! / 100.0; // -1.0 до 1.0
+
+        // Вычисляем скорость вперед/назад
+        final forwardSpeed =
+            (left + right) / 2.0; // средняя скорость вперед/назад
+
+        // Вычисляем угловую скорость (разница между моторами)
+        final angularSpeed = (right - left) / 2.0; // -1.0 до 1.0
+
+        // Для движения на карте:
+        // - Вперед/назад: по оси Y (вперед = отрицательный Y, назад = положительный Y)
+        // - Поворот влево/вправо: по оси X (влево = отрицательный X, вправо = положительный X)
+        // Скорость увеличена в 2.5 раза: 0.15 * 2.5 = 0.375
+        final stepSize = 0.375;
+
+        Offset direction;
+        if ((left > 0 && right < 0) || (left < 0 && right > 0)) {
+          // Поворот на месте - двигаемся вбок
+          // Влево: left < 0, right > 0 -> angularSpeed > 0 -> движение влево (отрицательный X)
+          // Вправо: left > 0, right < 0 -> angularSpeed < 0 -> движение вправо (положительный X)
+          direction = Offset(-angularSpeed * stepSize, 0);
+        } else {
+          // Движение вперед (forwardSpeed > 0) или назад (forwardSpeed < 0)
+          // На карте: вперед = отрицательное Y (вверх), назад = положительное Y (вниз)
+          direction = Offset(0, -forwardSpeed * stepSize);
+        }
+
+        // Обновляем позицию робота на карте
+        if (direction.distance > 0.001) {
+          ref.read(manualMapProvider.notifier).moveRobot(direction);
+        }
+      } else {
+        timer.cancel();
+        _positionUpdateTimer = null;
+      }
+    });
+  }
+
+  void _stopMoving() {
+    _moveTimer?.cancel();
+    _moveTimer = null;
+    _positionUpdateTimer?.cancel();
+    _positionUpdateTimer = null;
+    _currentLeft = null;
+    _currentRight = null;
+
+    if (widget.enabled) {
+      ref.read(wifiConnectionProvider.notifier).sendStop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * widget.uiScale;
     final btnSize = u(55).clamp(50.0, 65.0);
     final gap = u(6).clamp(4.0, 8.0);
 
@@ -1517,14 +1647,11 @@ class _ArrowControls extends ConsumerWidget {
                 _ArrowButton(
                   size: btnSize,
                   icon: Icons.keyboard_arrow_up_rounded,
-                  enabled: enabled,
+                  enabled: widget.enabled,
                   color: Colors.white,
                   onPressed: () {
-                    // Вперёд: M,50,50
-                    ref.read(wifiConnectionProvider.notifier).sendMove(50, 50);
-                  },
-                  onReleased: () {
-                    ref.read(wifiConnectionProvider.notifier).sendStop();
+                    // Вперёд: M,100,100 (увеличено в 3 раза, но максимум 100)
+                    _startMoving(100, 100);
                   },
                 ),
                 SizedBox(height: gap),
@@ -1535,42 +1662,32 @@ class _ArrowControls extends ConsumerWidget {
                     _ArrowButton(
                       size: btnSize,
                       icon: Icons.keyboard_arrow_left_rounded,
-                      enabled: enabled,
+                      enabled: widget.enabled,
                       color: Colors.white,
                       onPressed: () {
-                        // Влево (поворот на месте): M,-50,50
-                        ref
-                            .read(wifiConnectionProvider.notifier)
-                            .sendMove(-50, 50);
-                      },
-                      onReleased: () {
-                        ref.read(wifiConnectionProvider.notifier).sendStop();
+                        // Влево (поворот на месте): M,-100,100 (увеличено в 3 раза)
+                        _startMoving(-100, 100);
                       },
                     ),
                     SizedBox(width: gap),
                     _ArrowButton(
                       size: btnSize,
                       icon: Icons.stop_rounded,
-                      enabled: enabled,
-                      color: Color(0xFF6E6E6E),
+                      enabled: widget.enabled,
+                      color: Colors.white,
                       onPressed: () {
-                        ref.read(wifiConnectionProvider.notifier).sendStop();
+                        _stopMoving();
                       },
                     ),
                     SizedBox(width: gap),
                     _ArrowButton(
                       size: btnSize,
                       icon: Icons.keyboard_arrow_right_rounded,
-                      enabled: enabled,
+                      enabled: widget.enabled,
                       color: Colors.white,
                       onPressed: () {
-                        // Вправо (поворот на месте): M,50,-50
-                        ref
-                            .read(wifiConnectionProvider.notifier)
-                            .sendMove(50, -50);
-                      },
-                      onReleased: () {
-                        ref.read(wifiConnectionProvider.notifier).sendStop();
+                        // Вправо (поворот на месте): M,100,-100 (увеличено в 3 раза)
+                        _startMoving(100, -100);
                       },
                     ),
                   ],
@@ -1580,16 +1697,11 @@ class _ArrowControls extends ConsumerWidget {
                 _ArrowButton(
                   size: btnSize,
                   icon: Icons.keyboard_arrow_down_rounded,
-                  enabled: enabled,
-                  color: Color(0xFF6E6E6E),
+                  enabled: widget.enabled,
+                  color: Colors.white,
                   onPressed: () {
-                    // Назад: M,-50,-50
-                    ref
-                        .read(wifiConnectionProvider.notifier)
-                        .sendMove(-50, -50);
-                  },
-                  onReleased: () {
-                    ref.read(wifiConnectionProvider.notifier).sendStop();
+                    // Назад: M,-100,-100 (увеличено в 3 раза, но максимум -100)
+                    _startMoving(-100, -100);
                   },
                 ),
               ],
@@ -1607,7 +1719,6 @@ class _ArrowButton extends StatelessWidget {
   final bool enabled;
   final Color color;
   final VoidCallback onPressed;
-  final VoidCallback? onReleased;
 
   const _ArrowButton({
     required this.size,
@@ -1615,15 +1726,15 @@ class _ArrowButton extends StatelessWidget {
     required this.enabled,
     required this.color,
     required this.onPressed,
-    this.onReleased,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: enabled ? (_) => onPressed() : null,
-      onTapUp: enabled && onReleased != null ? (_) => onReleased!() : null,
-      onTapCancel: enabled && onReleased != null ? () => onReleased!() : null,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: enabled ? onPressed : null,
+        borderRadius: BorderRadius.circular(16),
       child: Container(
         width: size,
         height: size,
@@ -1655,6 +1766,7 @@ class _ArrowButton extends StatelessWidget {
             icon,
             color: enabled ? color : Colors.white.withOpacity(0.4),
             size: size * 0.55,
+            ),
           ),
         ),
       ),
