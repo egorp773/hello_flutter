@@ -9,11 +9,7 @@ import 'package:go_router/go_router.dart';
 import 'package:hello_flutter/core/wifi_connection.dart';
 import 'package:hello_flutter/core/map_storage.dart';
 import 'package:hello_flutter/features/maps/maps_screen.dart';
-
-/// ============================================================================
-/// Battery mock (потом заменим на реальную телеметрию)
-/// ============================================================================
-final batteryPercentProvider = StateProvider<int>((ref) => 46);
+import 'package:hello_flutter/features/home/home_screen.dart' show batteryPercentProvider;
 
 /// ============================================================================
 /// ✅ Speed настройки (1.0 = базовая скорость, 0.33 = ~в 3 раза медленнее)
@@ -1859,26 +1855,54 @@ class _StatusPanel extends StatelessWidget {
       statusColor = Colors.red; // Красный для "Не подключено"
     }
 
-    return _GlassCard(
-      borderColor: accent.withOpacity(0.32),
-      child: Padding(
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          // Едва заметное неоновое свечение вокруг всей панели
+          BoxShadow(
+            color: statusColor.withOpacity(0.04),
+            blurRadius: 8.0,
+            spreadRadius: 0.2,
+          ),
+          BoxShadow(
+            color: statusColor.withOpacity(0.03),
+            blurRadius: 12.0,
+            spreadRadius: 0.3,
+          ),
+        ],
+      ),
+      child: _GlassCard(
+        borderColor: statusColor.withOpacity(0.15),
+        child: Padding(
         padding: EdgeInsets.symmetric(
           horizontal: u(12).clamp(10.0, 12.0),
           vertical: u(10).clamp(8.0, 10.0),
         ),
         child: Row(
           children: [
-            _BatteryChip(uiScale: uiScale, percent: batteryPercent),
+            _BatteryChip(uiScale: uiScale, percent: batteryPercent, isConnected: wifi.isConnected),
             SizedBox(width: u(10)),
             Expanded(
               child: Row(
                 children: [
-                  Icon(
-                    wifi.isConnected
-                        ? Icons.wifi_rounded
-                        : Icons.wifi_off_rounded,
-                    color: statusColor,
-                    size: u(18).clamp(16.0, 18.0),
+                  Container(
+                    decoration: BoxDecoration(
+                      boxShadow: [
+                        BoxShadow(
+                          color: statusColor.withOpacity(0.06),
+                          blurRadius: 4.0,
+                          spreadRadius: 0.2,
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      wifi.isConnected
+                          ? Icons.wifi_rounded
+                          : Icons.wifi_off_rounded,
+                      color: statusColor,
+                      size: u(18).clamp(16.0, 18.0),
+                    ),
                   ),
                   SizedBox(width: u(8)),
                   Expanded(
@@ -1888,6 +1912,19 @@ class _StatusPanel extends StatelessWidget {
                         fontWeight: FontWeight.w900,
                         fontSize: u(11.5).clamp(10.5, 11.5),
                         color: statusColor,
+                        shadows: [
+                          // Едва заметное неоновое свечение
+                          Shadow(
+                            color: statusColor.withOpacity(0.1),
+                            blurRadius: 4.0,
+                            offset: const Offset(0, 0),
+                          ),
+                          Shadow(
+                            color: statusColor.withOpacity(0.06),
+                            blurRadius: 6.0,
+                            offset: const Offset(0, 0),
+                          ),
+                        ],
                       ),
                       maxLines: 2,
                       softWrap: true,
@@ -1908,6 +1945,7 @@ class _StatusPanel extends StatelessWidget {
           ],
         ),
       ),
+      ),
     );
   }
 }
@@ -1915,12 +1953,33 @@ class _StatusPanel extends StatelessWidget {
 class _BatteryChip extends StatelessWidget {
   final double uiScale;
   final int percent;
-  const _BatteryChip({required this.uiScale, required this.percent});
+  final bool isConnected;
+  const _BatteryChip({
+    required this.uiScale,
+    required this.percent,
+    required this.isConnected,
+  });
 
   @override
   Widget build(BuildContext context) {
     double u(double v) => v * uiScale;
     final p = percent.clamp(0, 100);
+
+    // Определяем цвет в зависимости от уровня заряда и подключения
+    Color batteryColor;
+    if (!isConnected) {
+      // Серый цвет, когда робот не подключен
+      batteryColor = const Color(0xFF6E6E6E);
+    } else if (p <= 20) {
+      // Красный для низкого заряда
+      batteryColor = const Color(0xFFCC6666);
+    } else if (p <= 50) {
+      // Желтый для среднего заряда
+      batteryColor = const Color(0xFFCCAA66);
+    } else {
+      // Зеленый для высокого заряда
+      batteryColor = const Color(0xFF66CC66);
+    }
 
     return Container(
       padding: EdgeInsets.symmetric(
@@ -1930,18 +1989,21 @@ class _BatteryChip extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(16),
         color: Colors.white.withOpacity(0.05),
-        border: Border.all(color: Colors.white.withOpacity(0.10)),
+        border: Border.all(color: batteryColor.withOpacity(0.3)),
       ),
       child: Row(
         children: [
           Icon(Icons.battery_full_rounded,
               size: u(18).clamp(16.0, 18.0),
-              color: Colors.white.withOpacity(0.88)),
-          SizedBox(width: u(6)),
-          Text('$p%',
-              style: TextStyle(
-                  fontWeight: FontWeight.w900,
-                  fontSize: u(12.5).clamp(11.0, 12.5))),
+              color: batteryColor),
+          if (isConnected) ...[
+            SizedBox(width: u(6)),
+            Text('$p%',
+                style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: u(12.5).clamp(11.0, 12.5),
+                    color: batteryColor)),
+          ],
         ],
       ),
     );

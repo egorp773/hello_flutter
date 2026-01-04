@@ -1,61 +1,97 @@
 // lib/core/route_builder.dart
+import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui';
 
 import '../features/manual/manual_control_screen.dart';
 
-enum RouteErrorCode {
-  noStart,
-  noTransitions,
-  blueIntersectsForbidden,
-  startToBlueBlocked,
-  mowingFailed,
+// ==== ОПРЕДЕЛЕНИЯ ТИПОВ ====
+enum CellType { empty, red, green, blue }
+
+class Pt {
+  final double x;
+  final double y;
+  const Pt(this.x, this.y);
 }
 
-class _Poly {
-  final List<Offset> points;
-  const _Poly(this.points);
+class I2 {
+  final int x;
+  final int y;
+  const I2(this.x, this.y);
 }
 
-class _PickTransitionResult {
-  final int transitionIndex;
-  final int segIndex; // segment i -> i+1
-  final Offset snapPoint; // nearest point on polyline
-  const _PickTransitionResult(
-      this.transitionIndex, this.segIndex, this.snapPoint);
-}
+class GridMap {
+  final int w;
+  final int h;
+  final double cellSize;
+  final double minX;
+  final double minY;
+  final CellType Function(int x, int y) at;
 
-class _Traversal {
-  final List<Offset>
-      pts; // pts[0] = snapPoint, далее точки синей линии в выбранном направлении
-  final List<double> cum; // cum[i] = длина от pts[0] до pts[i]
-  const _Traversal(this.pts, this.cum);
-  double get total => cum.isEmpty ? 0.0 : cum.last;
-}
-
-class _Proj {
-  final int segIndex;
-  final double t;
-  final Offset point;
-  final double progress;
-  final double dist;
-  const _Proj({
-    required this.segIndex,
-    required this.t,
-    required this.point,
-    required this.progress,
-    required this.dist,
+  GridMap({
+    required this.w,
+    required this.h,
+    required this.cellSize,
+    required this.minX,
+    required this.minY,
+    required this.at,
   });
 }
 
+// ==== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====
+bool isBlue(CellType t) => t == CellType.blue;
+bool isGreen(CellType t) => t == CellType.green;
+bool isForbidden(CellType t) => t == CellType.red;
+
+Pt cellCenter(GridMap g, int cx, int cy) {
+  return Pt(
+    g.minX + cx * g.cellSize + g.cellSize * 0.5,
+    g.minY + cy * g.cellSize + g.cellSize * 0.5,
+  );
+}
+
+I2 worldToCell(GridMap g, Pt p) {
+  return I2(
+    ((p.x - g.minX) / g.cellSize).floor(),
+    ((p.y - g.minY) / g.cellSize).floor(),
+  );
+}
+
+bool _inBounds(GridMap g, int x, int y) => x >= 0 && y >= 0 && x < g.w && y < g.h;
+
+/// allowBlue=true => green+blue разрешены, red запрещён
+bool isPointSafe(GridMap g, Pt p, {required bool allowBlue}) {
+  final c = worldToCell(g, p);
+  if (!_inBounds(g, c.x, c.y)) return false;
+  final t = g.at(c.x, c.y);
+  if (isForbidden(t)) return false;
+  if (isGreen(t)) return true;
+  if (allowBlue && isBlue(t)) return true;
+  return false;
+}
+
+// ==== КОДЫ ОШИБОК ====
+enum RouteErrorCode {
+  noStart,
+  greenEmpty,
+  noBlue,
+  startNotBlueOrGreen,
+  buildFailed,
+}
+
 class RouteBuilder {
+  static ManualMapState? _currentMapState;
+
+  /// Главный вход: возвращает (маршрут, ошибка)
   static (List<Offset>, RouteErrorCode?) buildRoute(
     ManualMapState mapState, {
     double lineStepCells = 0.8,
     double turnRadiusCells = 1.0,
-    double cellSize = 1.0,
+    bool allowBlue = true,
     bool debugPrint = false,
   }) {
+    _currentMapState = mapState;
+
     void log(String s) {
       if (debugPrint) {
         // ignore: avoid_print
@@ -63,886 +99,964 @@ class RouteBuilder {
       }
     }
 
-    final start = mapState.startPoint ?? mapState.robot;
-    final greens = mapState.zones.map((z) => _Poly(z.points)).toList();
-    final reds = mapState.forbiddens.map((f) => _Poly(f.points)).toList();
-    final transitions = mapState.transitions;
+    final g = _convertToGridMap(mapState);
+    if (g == null) return (const [], RouteErrorCode.noStart);
 
-    if (_pointInAnyPolygon(start, reds)) {
-      log('Start inside forbidden');
-      return (const [], RouteErrorCode.noStart);
-    }
-    if (transitions.isEmpty) {
-      log('No transitions');
-      return (const [], RouteErrorCode.noTransitions);
-    }
+    final startWorld = mapState.startPoint != null
+        ? Pt(mapState.startPoint!.dx, mapState.startPoint!.dy)
+        : Pt(mapState.robot.dx, mapState.robot.dy);
 
-    // 1) выбираем ближайшую синюю полилинию
-    final pick = _pickNearestTransition(start, transitions);
-    if (pick == null) return (const [], RouteErrorCode.noTransitions);
+    // СНАП старта на ближайшую blue/green клетку (если вдруг попал в empty)
+    final snapped = _snapToNearestAllowed(g, startWorld);
+    final start = snapped ?? startWorld;
 
-    final blue = transitions[pick.transitionIndex];
+    // Если синей нет — работаем только по зелёным (тогда детуры не нужны)
+    final hasBlue = mapState.transitions.isNotEmpty &&
+        mapState.transitions.any((p) => p.length >= 2);
 
-    // 2) синяя линия не должна залезать в красную
-    if (_polylineHitsForbidden(blue, reds)) {
-      log('Blue intersects forbidden -> impossible');
-      return (const [], RouteErrorCode.blueIntersectsForbidden);
-    }
+    // Параметр плотности точек на синей: чем меньше — тем “ровнее 1в1”
+    final blueStepWorld = g.cellSize * 0.35;
 
-    // 3) подъезд к синей
-    final route = <Offset>[start];
-    if ((start - pick.snapPoint).distance > 1e-6) {
-      if (_segmentHitsForbidden(start, pick.snapPoint, reds, samples: 80)) {
-        log('Start->Blue crosses forbidden');
-        return (const [], RouteErrorCode.startToBlueBlocked);
-      }
-      route.add(pick.snapPoint);
-    }
-
-    // 4) строим traversal по синей в обе стороны, выбираем направление:
-    final forward = _buildTraversalFromSnap(
-      blue: blue,
-      snapPoint: pick.snapPoint,
-      snapSegIndex: pick.segIndex,
-      dirForward: true,
-    );
-    final backward = _buildTraversalFromSnap(
-      blue: blue,
-      snapPoint: pick.snapPoint,
-      snapSegIndex: pick.segIndex,
-      dirForward: false,
-    );
-
-    final fHit = _firstGreenHitIndexOnTraversal(forward.pts, greens);
-    final bHit = _firstGreenHitIndexOnTraversal(backward.pts, greens);
-
-    _Traversal traversal;
-    if (greens.isEmpty) {
-      traversal = forward.total >= backward.total ? forward : backward;
-    } else if (fHit != -1 && bHit != -1) {
-      traversal = (fHit <= bHit) ? forward : backward;
-    } else if (fHit != -1) {
-      traversal = forward;
-    } else if (bHit != -1) {
-      traversal = backward;
-    } else {
-      traversal = forward.total >= backward.total ? forward : backward;
-    }
-
-    log('Traversal points: ${traversal.pts.length}, total=${traversal.total}');
-
-    // 5) Едем по синей 1-в-1, встречаем зелёные зоны -> делаем змейку -> возвращаемся на синюю -> продолжаем
-    final visitedGreen = <int>{};
-
-    Offset cur = route.last;
-
-    // Мы будем идти по traversal сегментами.
-    int i = 0;
-    while (i < traversal.pts.length - 1) {
-      final nextBluePoint = traversal.pts[i + 1];
-
-      // сегмент по синей безопасен (уже проверено), но оставим защиту:
-      if (_segmentHitsForbidden(cur, nextBluePoint, reds, samples: 60)) {
-        return (
-          _simplify(route, minDist: cellSize * 0.05),
-          RouteErrorCode.blueIntersectsForbidden
-        );
-      }
-
-      // Проверяем: входим ли в зелёную на этом синем сегменте
-      final hit = _firstGreenHitOnSegment(cur, nextBluePoint, greens);
-      if (hit == null) {
-        // просто добавляем следующую точку синей
-        if ((route.last - nextBluePoint).distance > 1e-6)
-          route.add(nextBluePoint);
-        cur = nextBluePoint;
-        i++;
-        continue;
-      }
-
-      final zoneIndex = hit.$1;
-      final enterPoint = hit.$2;
-
-      // если зона уже убрана — просто проезжаем сегмент синей дальше
-      if (visitedGreen.contains(zoneIndex)) {
-        if ((route.last - nextBluePoint).distance > 1e-6)
-          route.add(nextBluePoint);
-        cur = nextBluePoint;
-        i++;
-        continue;
-      }
-
-      // добавляем точку входа в зелёную (она лежит на синем сегменте)
-      if ((route.last - enterPoint).distance > 1e-6) route.add(enterPoint);
-      cur = enterPoint;
-
-      // делаем змейку
-      final mowing = _buildMowingSnake(
-        zone: greens[zoneIndex].points,
-        forbiddens: reds,
-        start: enterPoint,
-        step: lineStepCells * cellSize,
-        turnRadius: turnRadiusCells * cellSize,
-        debugPrint: debugPrint,
+    // 1) если есть синяя — строим “синяя магистраль + детуры в зелёное + продолжение”
+    if (hasBlue) {
+      final pts = _buildRouteBlueWithMowDetours(
+        g,
+        mapState,
+        start,
+        blueStepWorld: blueStepWorld,
+        lineStepCells: lineStepCells,
+        turnRadiusCells: turnRadiusCells,
+        allowBlue: allowBlue,
+        log: log,
       );
 
-      if (mowing.isEmpty) {
-        return (
-          _simplify(route, minDist: cellSize * 0.05),
-          RouteErrorCode.mowingFailed
-        );
+      if (pts.isNotEmpty) {
+        final res = pts.map((p) => Offset(p.x, p.y)).toList();
+        return (res, null);
       }
 
-      // добавляем змейку (без дубля первой точки)
-      for (final p in mowing) {
-        if (route.isNotEmpty && (route.last - p).distance < 1e-6) continue;
-        route.add(p);
-      }
-      cur = route.last;
-      visitedGreen.add(zoneIndex);
+      return (const [], RouteErrorCode.buildFailed);
+    }
 
-      // возвращаемся на синюю:
-      // ищем ближайшую точку на текущем/следующих сегментах traversal (начиная с текущего i)
-      final rejoin =
-          _projectToTraversalFromIndex(cur, traversal, startSegIndex: i);
-      if (rejoin == null) {
-        // fallback: вернуться в enterPoint (он точно на синей) и продолжить
-        if ((route.last - enterPoint).distance > 1e-6) route.add(enterPoint);
-        cur = enterPoint;
-      } else {
-        // соединение cur -> rejoin.point должно быть безопасным
-        if (_segmentHitsForbidden(cur, rejoin.point, reds, samples: 90)) {
-          if ((route.last - enterPoint).distance > 1e-6) route.add(enterPoint);
-          cur = enterPoint;
+    // 2) если синей нет — просто змейка по всем зелёным компонентам
+    final greenComponents = _findGreenComponents(g);
+    if (greenComponents.isEmpty) return (const [], RouteErrorCode.greenEmpty);
+
+    final out = <Pt>[start];
+    Pt cur = start;
+
+    for (final comp in greenComponents) {
+      final mow = _buildMowPathForComponent(
+        g,
+        comp,
+        start: cur,
+        lineStepCells: lineStepCells,
+        turnRadiusCells: turnRadiusCells,
+        allowBlue: allowBlue,
+        log: log,
+        mapState: mapState,
+      );
+      if (mow.isNotEmpty) {
+        if (_samePt(out.last, mow.first)) {
+          out.addAll(mow.skip(1));
         } else {
-          if ((route.last - rejoin.point).distance > 1e-6)
-            route.add(rejoin.point);
-          cur = rejoin.point;
-          // выставляем i так, чтобы продолжить дальше по синей (на сегменте rejoin)
-          i = rejoin.segIndex;
+          out.addAll(mow);
+        }
+        cur = out.last;
+      }
+    }
+
+    final cleaned = _simplify(out, minDist: g.cellSize * 0.10);
+    return (cleaned.map((p) => Offset(p.x, p.y)).toList(), null);
+  }
+
+  // =============================================================
+  // MAP -> GRID
+  // =============================================================
+
+  static GridMap? _convertToGridMap(ManualMapState mapState) {
+    // границы
+    double minX = double.infinity;
+    double maxX = -double.infinity;
+    double minY = double.infinity;
+    double maxY = -double.infinity;
+
+    void addPoint(Offset p) {
+      if (p.dx < minX) minX = p.dx;
+      if (p.dx > maxX) maxX = p.dx;
+      if (p.dy < minY) minY = p.dy;
+      if (p.dy > maxY) maxY = p.dy;
+    }
+
+    for (final z in mapState.zones) {
+      for (final p in z.points) addPoint(p);
+    }
+    for (final f in mapState.forbiddens) {
+      for (final p in f.points) addPoint(p);
+    }
+    for (final tr in mapState.transitions) {
+      for (final p in tr) addPoint(p);
+    }
+    addPoint(mapState.robot);
+    if (mapState.startPoint != null) addPoint(mapState.startPoint!);
+
+    if (minX == double.infinity) return null;
+
+    // отступ
+    const padding = 10.0;
+    minX -= padding;
+    maxX += padding;
+    minY -= padding;
+    maxY += padding;
+
+    // !!! ВАЖНО !!!
+    // Я оставил cellSize=1.0 как у тебя.
+    // Если в твоём мире 1 клетка = 10 пикселей/см/метров — скажи, и мы выставим правильно.
+    const cellSize = 1.0;
+
+    final w = ((maxX - minX) / cellSize).ceil();
+    final h = ((maxY - minY) / cellSize).ceil();
+    if (w <= 0 || h <= 0) return null;
+
+    CellType at(int x, int y) {
+      final worldX = minX + x * cellSize + cellSize * 0.5;
+      final worldY = minY + y * cellSize + cellSize * 0.5;
+      final pt = Offset(worldX, worldY);
+
+      // RED
+      for (final forbidden in mapState.forbiddens) {
+        if (_pointInPolygon(pt, forbidden.points)) return CellType.red;
+      }
+
+      // GREEN
+      for (final zone in mapState.zones) {
+        if (_pointInPolygon(pt, zone.points)) return CellType.green;
+      }
+
+      // BLUE (линия может быть не по центрам клеток)
+      for (final tr in mapState.transitions) {
+        if (_pointNearPolyline(pt, tr, threshold: cellSize * 0.85)) {
+          return CellType.blue;
         }
       }
 
-      // после возврата на синюю НЕ увеличиваем i принудительно — цикл сам продолжит
+      return CellType.empty;
     }
 
-    // 6) Финал: гарантированно добавляем последнюю точку синей (если её нет)
-    if (traversal.pts.isNotEmpty) {
-      final lastBlue = traversal.pts.last;
-      if ((route.last - lastBlue).distance > 1e-6) {
-        // это тоже часть синей — безопасно
-        route.add(lastBlue);
-      }
+    return GridMap(
+      w: w,
+      h: h,
+      cellSize: cellSize,
+      minX: minX,
+      minY: minY,
+      at: at,
+    );
+  }
+
+  // =============================================================
+  // GEOMETRY
+  // =============================================================
+
+  static bool _pointInPolygon(Offset point, List<Offset> polygon) {
+    if (polygon.length < 3) return false;
+
+    bool inside = false;
+    int j = polygon.length - 1;
+
+    for (int i = 0; i < polygon.length; i++) {
+      final xi = polygon[i].dx;
+      final yi = polygon[i].dy;
+      final xj = polygon[j].dx;
+      final yj = polygon[j].dy;
+
+      final intersect = ((yi > point.dy) != (yj > point.dy)) &&
+          (point.dx < (xj - xi) * (point.dy - yi) / (yj - yi + 1e-12) + xi);
+      if (intersect) inside = !inside;
+      j = i;
     }
 
-    return (_simplify(route, minDist: cellSize * 0.05), null);
+    return inside;
+  }
+
+  static bool _pointNearPolyline(Offset point, List<Offset> polyline,
+      {required double threshold}) {
+    if (polyline.length < 2) return false;
+
+    for (int i = 0; i < polyline.length - 1; i++) {
+      final a = polyline[i];
+      final b = polyline[i + 1];
+      final dist = _pointToLineSegmentDistance(point, a, b);
+      if (dist <= threshold) return true;
+    }
+    return false;
+  }
+
+  static double _pointToLineSegmentDistance(Offset p, Offset a, Offset b) {
+    final ab = b - a;
+    final ap = p - a;
+    final abSq = ab.distanceSquared;
+    if (abSq < 1e-12) return (p - a).distance;
+
+    final t = (ap.dx * ab.dx + ap.dy * ab.dy) / abSq;
+    final tt = t.clamp(0.0, 1.0);
+    final c = a + Offset(ab.dx * tt, ab.dy * tt);
+    return (p - c).distance;
   }
 }
 
-/// ==========================
-/// СИНЯЯ ЛИНИЯ / TRAVERSAL
-/// ==========================
+// =============================================================
+// CORE ROUTING: BLUE SPINE + DETOURS INTO GREEN + CONTINUE BLUE
+// =============================================================
 
-_Traversal _buildTraversalFromSnap({
-  required List<Offset> blue,
-  required Offset snapPoint,
-  required int snapSegIndex,
-  required bool dirForward,
+class _GreenComp {
+  final Set<I2> cells;
+  final List<_Entrance> entrances;
+  _GreenComp({required this.cells, required this.entrances});
+}
+
+class _Entrance {
+  final I2 greenCell;
+  final I2 blueCell;
+  _Entrance({required this.greenCell, required this.blueCell});
+}
+
+List<Pt> _buildRouteBlueWithMowDetours(
+  GridMap g,
+  ManualMapState mapState,
+  Pt startWorld, {
+  required double blueStepWorld,
+  required double lineStepCells,
+  required double turnRadiusCells,
+  required bool allowBlue,
+  required void Function(String) log,
 }) {
-  final pts = <Offset>[snapPoint];
-
-  if (blue.length < 2) {
-    return _Traversal(pts, const [0.0]);
+  // 1) строим “спину” по синей строго
+  final spine = _buildBlueSpineFromStart(
+    mapState,
+    startWorld,
+    stepWorld: blueStepWorld,
+  );
+  if (spine.isEmpty) {
+    log('BLUE SPINE EMPTY');
+    return const [];
   }
 
-  if (dirForward) {
-    // идём к blue[snapSeg+1], потом дальше до конца
-    for (int i = snapSegIndex + 1; i < blue.length; i++) {
-      pts.add(blue[i]);
+  // 2) компоненты зелёного + входы
+  final greenComponents = _findGreenComponents(g);
+  final comps = <_GreenComp>[];
+  for (final cells in greenComponents) {
+    final entrances = _findEntrancesToGreen(g, cells);
+    comps.add(_GreenComp(cells: cells, entrances: entrances));
+  }
+
+  // Если зелёных нет — просто едем по синей до конца
+  if (comps.isEmpty) return spine;
+
+  final done = List<bool>.filled(comps.length, false);
+
+  // 3) идём по синей; если рядом вход в зелёное — детур; потом возвращаемся на синюю и продолжаем
+  final out = <Pt>[];
+  out.add(spine.first);
+
+  for (int i = 0; i < spine.length; i++) {
+    final curBlue = spine[i];
+    if (!_samePt(out.last, curBlue)) out.add(curBlue);
+
+    // ищем ближайший вход среди ещё не убранных
+    int bestComp = -1;
+    _Entrance? bestEnt;
+    double bestD2 = double.infinity;
+
+    for (int ci = 0; ci < comps.length; ci++) {
+      if (done[ci]) continue;
+      final comp = comps[ci];
+      if (comp.entrances.isEmpty) continue;
+
+      for (final e in comp.entrances) {
+        final bp = cellCenter(g, e.blueCell.x, e.blueCell.y);
+        final d2 = _dist2(curBlue, bp);
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          bestComp = ci;
+          bestEnt = e;
+        }
+      }
+    }
+
+    // порог близости входа к синей точке
+    final nearThreshold = g.cellSize * 2.2; // если входы пропускаются — увеличь до 3.0
+    if (bestComp == -1 ||
+        bestEnt == null ||
+        bestD2 > nearThreshold * nearThreshold) {
+      continue; // просто едем дальше по синей
+    }
+
+    // ДЕТУР
+    done[bestComp] = true;
+
+    final entryGreen =
+        cellCenter(g, bestEnt.greenCell.x, bestEnt.greenCell.y);
+
+    // 3.1) съезд с синей в зелёное
+    _appendSafeLine(
+      out,
+      g,
+      out.last,
+      entryGreen,
+      allowBlue: true,
+      samples: 24,
+      mapState: mapState,
+      enforceForbidden: true,
+    );
+
+    // 3.2) змейка по зелёной компоненте (строго параллельными прямыми)
+    final mow = _buildMowPathForComponent(
+      g,
+      comps[bestComp].cells,
+      start: out.last,
+      lineStepCells: lineStepCells,
+      turnRadiusCells: turnRadiusCells,
+      allowBlue: allowBlue,
+      log: log,
+      mapState: mapState,
+    );
+
+    if (mow.isNotEmpty) {
+      if (_samePt(out.last, mow.first)) {
+        out.addAll(mow.skip(1));
+      } else {
+        out.addAll(mow);
+      }
+    }
+
+    // 3.3) вернуться на синюю ВПЕРЁД (не назад)
+    int bestJ = i;
+    double bestJoinD2 = double.infinity;
+
+    final maxLook = math.min(spine.length - 1, i + 400);
+    for (int j = i; j <= maxLook; j++) {
+      final p = spine[j];
+      final d2 = _dist2(out.last, p);
+      if (d2 < bestJoinD2) {
+        bestJoinD2 = d2;
+        bestJ = j;
+      }
+    }
+
+    // Проверка границ перед доступом к массиву
+    if (bestJ < 0 || bestJ >= spine.length) {
+      log('ERROR: bestJ out of bounds: $bestJ, spine.length: ${spine.length}');
+      break;
+    }
+
+    final rejoin = spine[bestJ];
+
+    _appendSafeLine(
+      out,
+      g,
+      out.last,
+      rejoin,
+      allowBlue: true,
+      samples: 28,
+      mapState: mapState,
+      enforceForbidden: true,
+    );
+
+    // двигаем индекс вперёд, чтобы продолжить синюю "после возврата"
+    // Используем bestJ - 1, так как цикл for увеличит i на следующей итерации
+    // Но не меньше текущего i, чтобы не зациклиться
+    i = math.max(i, bestJ - 1);
+  }
+
+  return _simplify(out, minDist: g.cellSize * 0.10);
+}
+
+// =============================================================
+// BLUE SPINE (STRICT)
+// =============================================================
+
+List<Pt> _buildBlueSpineFromStart(
+  ManualMapState mapState,
+  Pt startWorld, {
+  required double stepWorld,
+}) {
+  if (mapState.transitions.isEmpty) return const [];
+
+  int bestPoly = -1;
+  int bestSeg = -1;
+  Offset bestProj = const Offset(0, 0);
+  double bestDist = double.infinity;
+
+  for (int pi = 0; pi < mapState.transitions.length; pi++) {
+    final poly = mapState.transitions[pi];
+    if (poly.length < 2) continue;
+
+    for (int i = 0; i < poly.length - 1; i++) {
+      final a = poly[i];
+      final b = poly[i + 1];
+      final proj = _closestPointOnSegment(
+        Offset(startWorld.x, startWorld.y),
+        a,
+        b,
+      );
+      final d = (Offset(startWorld.x, startWorld.y) - proj).distance;
+      if (d < bestDist) {
+        bestDist = d;
+        bestPoly = pi;
+        bestSeg = i;
+        bestProj = proj;
+      }
+    }
+  }
+
+  if (bestPoly == -1) return const [];
+
+  final poly = mapState.transitions[bestPoly];
+
+  // направление: куда "вперёд"
+  final dToFirst = (bestProj - poly.first).distance;
+  final dToLast = (bestProj - poly.last).distance;
+  final forwardToLast = dToLast >= dToFirst;
+
+  final stitched = <Offset>[];
+  stitched.add(bestProj);
+
+  if (forwardToLast) {
+    for (int i = bestSeg + 1; i < poly.length; i++) {
+      stitched.add(poly[i]);
     }
   } else {
-    // назад: идём к blue[snapSeg], потом к 0
-    for (int i = snapSegIndex; i >= 0; i--) {
-      pts.add(blue[i]);
+    for (int i = bestSeg; i >= 0; i--) {
+      stitched.add(poly[i]);
     }
   }
 
-  final cum = List<double>.filled(pts.length, 0.0);
-  for (int i = 1; i < pts.length; i++) {
-    cum[i] = cum[i - 1] + (pts[i] - pts[i - 1]).distance;
-  }
-  return _Traversal(pts, cum);
+  // СЕМПЛИНГ строго по отрезкам (не "срезает углы")
+  return _samplePolylineStrict(stitched, step: stepWorld);
 }
 
-int _firstGreenHitIndexOnTraversal(List<Offset> pts, List<_Poly> greens) {
-  if (greens.isEmpty) return -1;
-  for (int i = 0; i < pts.length; i++) {
-    for (int g = 0; g < greens.length; g++) {
-      if (_pointInPolygon(pts[i], greens[g].points)) return i;
-    }
-  }
-  return -1;
-}
+List<Pt> _samplePolylineStrict(List<Offset> poly, {required double step}) {
+  if (poly.length < 2) return const [];
 
-/// проецируем точку на traversal, но только начиная с segIndex >= startSegIndex
-_Proj? _projectToTraversalFromIndex(Offset p, _Traversal t,
-    {required int startSegIndex}) {
-  if (t.pts.length < 2) return null;
+  final out = <Pt>[];
+  out.add(Pt(poly.first.dx, poly.first.dy));
 
-  _Proj? best;
+  double carry = 0.0;
 
-  for (int i = math.max(0, startSegIndex); i < t.pts.length - 1; i++) {
-    final a = t.pts[i];
-    final b = t.pts[i + 1];
-    final proj = _projectPointToSegmentWithT(p, a, b);
-    final dist = (p - proj.$1).distance;
-    final segLen = (b - a).distance;
-    final progress = t.cum[i] + segLen * proj.$2;
+  for (int i = 0; i < poly.length - 1; i++) {
+    final a = poly[i];
+    final b = poly[i + 1];
+    final dx = b.dx - a.dx;
+    final dy = b.dy - a.dy;
+    final segLen = math.sqrt(dx * dx + dy * dy);
+    if (segLen < 1e-9) continue;
 
-    final cand = _Proj(
-      segIndex: i,
-      t: proj.$2,
-      point: proj.$1,
-      progress: progress,
-      dist: dist,
-    );
+    double dist = 0.0;
+    double firstT = 0.0;
 
-    if (best == null || cand.dist < best!.dist) best = cand;
-  }
-
-  return best;
-}
-
-/// ==========================
-/// ВХОД В ЗЕЛЁНУЮ НА СЕГМЕНТЕ
-/// ==========================
-
-(int, Offset)? _firstGreenHitOnSegment(Offset a, Offset b, List<_Poly> greens) {
-  if (greens.isEmpty) return null;
-
-  final len = (b - a).distance;
-  final samples = math.max(16, math.min(140, (len / 1.5).ceil()));
-
-  for (int i = 1; i <= samples; i++) {
-    final t = i / samples;
-    final p = Offset(
-      a.dx + (b.dx - a.dx) * t,
-      a.dy + (b.dy - a.dy) * t,
-    );
-    for (int g = 0; g < greens.length; g++) {
-      if (_pointInPolygon(p, greens[g].points)) {
-        return (g, p);
+    if (carry > 0) {
+      if (carry >= segLen) {
+        carry -= segLen;
+        continue;
+      } else {
+        firstT = carry / segLen;
+        dist = carry;
+        carry = 0.0;
       }
+    }
+
+    while (dist + step <= segLen + 1e-9) {
+      dist += step;
+      final t = dist / segLen;
+      out.add(Pt(a.dx + dx * t, a.dy + dy * t));
+    }
+
+    final remain = segLen - dist;
+    carry = (remain < 1e-6) ? 0.0 : step - remain;
+  }
+
+  final last = poly.last;
+  out.add(Pt(last.dx, last.dy));
+  return out;
+}
+
+Offset _closestPointOnSegment(Offset p, Offset a, Offset b) {
+  final ab = b - a;
+  final ap = p - a;
+  final abSq = ab.distanceSquared;
+  if (abSq < 1e-12) return a;
+
+  final t = (ap.dx * ab.dx + ap.dy * ab.dy) / abSq;
+  final tt = t.clamp(0.0, 1.0);
+  return a + Offset(ab.dx * tt, ab.dy * tt);
+}
+
+// =============================================================
+// GREEN COMPONENTS + ENTRANCES
+// =============================================================
+
+List<Set<I2>> _findGreenComponents(GridMap g) {
+  final visited = List<bool>.filled(g.w * g.h, false);
+  int idx(int x, int y) => y * g.w + x;
+
+  final comps = <Set<I2>>[];
+
+  for (int y = 0; y < g.h; y++) {
+    for (int x = 0; x < g.w; x++) {
+      if (visited[idx(x, y)]) continue;
+      if (!isGreen(g.at(x, y))) continue;
+
+      final comp = <I2>{};
+      final q = Queue<I2>();
+      q.add(I2(x, y));
+      visited[idx(x, y)] = true;
+
+      while (q.isNotEmpty) {
+        final c = q.removeFirst();
+        comp.add(c);
+
+        for (final n in _n4(c)) {
+          if (!_inBounds(g, n.x, n.y)) continue;
+          if (visited[idx(n.x, n.y)]) continue;
+          if (!isGreen(g.at(n.x, n.y))) continue;
+          visited[idx(n.x, n.y)] = true;
+          q.add(n);
+        }
+      }
+
+      comps.add(comp);
+    }
+  }
+
+  return comps;
+}
+
+List<_Entrance> _findEntrancesToGreen(GridMap g, Set<I2> greenCells) {
+  final res = <_Entrance>[];
+  for (final c in greenCells) {
+    for (final n in _n8(c)) {
+      if (!_inBounds(g, n.x, n.y)) continue;
+      if (isBlue(g.at(n.x, n.y))) {
+        res.add(_Entrance(greenCell: c, blueCell: n));
+      }
+    }
+  }
+  return res;
+}
+
+Pt? _snapToNearestAllowed(GridMap g, Pt startWorld) {
+  final c0 = worldToCell(g, startWorld);
+
+  bool ok(CellType t) => isBlue(t) || isGreen(t);
+
+  if (_inBounds(g, c0.x, c0.y) && ok(g.at(c0.x, c0.y))) {
+    return startWorld;
+  }
+
+  final visited = List<bool>.filled(g.w * g.h, false);
+  int idx(int x, int y) => y * g.w + x;
+
+  final q = Queue<I2>();
+  if (_inBounds(g, c0.x, c0.y)) {
+    q.add(c0);
+    visited[idx(c0.x, c0.y)] = true;
+  } else {
+    // если старт вне сетки — попробуем соседей
+    for (int dx = -2; dx <= 2; dx++) {
+      for (int dy = -2; dy <= 2; dy++) {
+        final x = c0.x + dx;
+        final y = c0.y + dy;
+        if (_inBounds(g, x, y) && !visited[idx(x, y)]) {
+          visited[idx(x, y)] = true;
+          q.add(I2(x, y));
+        }
+      }
+    }
+  }
+
+  while (q.isNotEmpty) {
+    final c = q.removeFirst();
+    final t = g.at(c.x, c.y);
+    if (ok(t)) return cellCenter(g, c.x, c.y);
+
+    for (final n in _n4(c)) {
+      if (!_inBounds(g, n.x, n.y)) continue;
+      if (visited[idx(n.x, n.y)]) continue;
+      visited[idx(n.x, n.y)] = true;
+      q.add(n);
     }
   }
 
   return null;
 }
 
-/// ==========================
-/// ЗМЕЙКА ВНУТРИ ЗОНЫ:
-/// - полосы строго параллельны (горизонтальные или вертикальные)
-/// - переход между полосами НЕ диагональный (верт/гор + скругление)
-/// ==========================
+// =============================================================
+// MOW PATH: PARALLEL STRIPES ONLY + END TURNS (NO DIAGONAL CROSS)
+// =============================================================
 
-List<Offset> _buildMowingSnake({
-  required List<Offset> zone,
-  required List<_Poly> forbiddens,
-  required Offset start,
-  required double step,
-  required double turnRadius,
-  required bool debugPrint,
+class _Dir {
+  final double x;
+  final double y;
+  const _Dir(this.x, this.y);
+
+  _Dir normalized() {
+    final len = math.sqrt(x * x + y * y);
+    if (len < 1e-9) return this;
+    return _Dir(x / len, y / len);
+  }
+}
+
+class _Stripe {
+  final double v; // уровень по нормали
+  final double uMin;
+  final double uMax;
+  _Stripe({required this.v, required this.uMin, required this.uMax});
+}
+
+List<Pt> _buildMowPathForComponent(
+  GridMap g,
+  Set<I2> greenCells, {
+  required Pt start,
+  required double lineStepCells,
+  required double turnRadiusCells,
+  required bool allowBlue,
+  required void Function(String) log,
+  required ManualMapState mapState,
 }) {
-  void log(String s) {
-    if (debugPrint) {
-      // ignore: avoid_print
-      print('[MOW] $s');
+  if (greenCells.isEmpty) return const [];
+
+  final stepWorld = lineStepCells * g.cellSize;
+
+  // Кандидаты направлений. Чтобы всё было строго параллельно — выбираем ОДНО направление на компоненту.
+  // Можно добавить 45°, но на практике чаще надо 0/90.
+  final dirs = <_Dir>[
+    const _Dir(1, 0),
+    const _Dir(0, 1),
+  ];
+
+  _Dir bestDir = dirs.first;
+  List<_Stripe> bestStripes = const [];
+  double bestScore = -1e18;
+
+  for (final d0 in dirs) {
+    final d = d0.normalized();
+    final stripes = _buildStripesFromGreen(g, greenCells, dir: d, stepWorld: stepWorld);
+    if (stripes.isEmpty) continue;
+
+    // Скоринг: покрытие - штраф за количество полос
+    final coverage = stripes.length.toDouble();
+    final score = coverage - stripes.length * 0.05;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestDir = d;
+      bestStripes = stripes;
     }
   }
 
-  if (zone.length < 3) return const [];
-  if (_pointInAnyPolygon(start, forbiddens)) return const [];
-
-  // bbox зелёной зоны
-  double minX = double.infinity, maxX = -double.infinity;
-  double minY = double.infinity, maxY = -double.infinity;
-  for (final p in zone) {
-    minX = math.min(minX, p.dx);
-    maxX = math.max(maxX, p.dx);
-    minY = math.min(minY, p.dy);
-    maxY = math.max(maxY, p.dy);
+  if (bestStripes.isEmpty) {
+    log('MOW: stripes empty');
+    return const [];
   }
 
-  final width = maxX - minX;
-  final height = maxY - minY;
+  // Упорядочим полосы по v (строго последовательно -> параллельность)
+  bestStripes.sort((a, b) => a.v.compareTo(b.v));
 
-  // выбираем ориентацию с меньшим числом полос
-  final horizontalCount = (height / step).ceil() + 1; // линии вдоль X
-  final verticalCount = (width / step).ceil() + 1; // линии вдоль Y
-  final useHorizontal = horizontalCount <= verticalCount;
+  // Преобразование (u,v) -> world
+  final n = _Dir(-bestDir.y, bestDir.x); // нормаль
 
-  log('useHorizontal=$useHorizontal step=$step');
+  Pt uvToWorld(double u, double v) => Pt(bestDir.x * u + n.x * v, bestDir.y * u + n.y * v);
 
-  final out = <Offset>[start];
-  Offset cur = start;
-  bool forward = true;
+  // Нужно привязать систему координат к миру:
+  // Берём опорную точку origin = (0,0) в world.
+  // Тогда u = dot(world, dir), v = dot(world, normal).
+  double dot(Pt p, _Dir a) => p.x * a.x + p.y * a.y;
 
-  // Радиус скругления на повороте. Если step маленький, берем r <= step/2,
-  // иначе поворот вылезает дальше чем расстояние между полосами.
-  final r = math.min(turnRadius, step * 0.5);
+  // Начальная позиция в uv
+  final u0 = dot(start, bestDir);
+  final v0 = dot(start, n);
 
-  if (useHorizontal) {
-    final n = math.max(1, ((maxY - minY) / step).ceil() + 1);
-
-    // Чтобы “не прыгать” на первую полосу, начинаем с ближайшей к старту y
-    final k0 = ((start.dy - minY) / step).round().clamp(0, n - 1);
-
-    // порядок полос: от k0 вверх/вниз змейкой
-    final order = <int>[];
-    for (int d = 0; d < n; d++) {
-      final up = k0 - d;
-      final down = k0 + d;
-      if (d == 0) {
-        order.add(k0);
-      } else {
-        if (up >= 0) order.add(up);
-        if (down < n) order.add(down);
-      }
-      if (order.length >= n) break;
+  // Найдём ближайшую полосу к старту (по |v-v0|)
+  int startStripeIdx = 0;
+  double bestDv = double.infinity;
+  for (int i = 0; i < bestStripes.length; i++) {
+    final dv = (bestStripes[i].v - v0).abs();
+    if (dv < bestDv) {
+      bestDv = dv;
+      startStripeIdx = i;
     }
+  }
 
-    for (int idx = 0; idx < order.length; idx++) {
-      final k = order[idx];
-      final y = minY + k * step;
+  // Строим порядок обхода: от ближайшей полосы вверх, затем вниз (или наоборот) — без прыжков через середину
+  final order = <int>[];
+  // вверх
+  for (int i = startStripeIdx; i < bestStripes.length; i++) order.add(i);
+  // вниз
+  for (int i = startStripeIdx - 1; i >= 0; i--) order.add(i);
 
-      final segs = _clipHorizontalLineToPolygon(
-        y: y,
-        zone: zone,
-        forbiddens: forbiddens,
-      );
-      if (segs.isEmpty) continue;
+  final out = <Pt>[];
+  Pt cur = start;
+  out.add(cur);
 
-      // Берём все сегменты (если красный вырезал полосу на части),
-      // но проходы по ним будут всё равно ГОРИЗОНТАЛЬНЫМИ (параллельными).
-      // Сортируем по X.
-      segs.sort((a, b) => a.$1.compareTo(b.$1));
+  bool forward = true; // направление по u
 
-      // Выбираем, с какого конца заходить, чтобы меньше “подъезд” от текущей позиции
-      // (без диагонали — подъезд делаем ортогонально).
-      // Для простоты: если forward, идём слева направо по сегментам; иначе справа налево.
-      final segOrder = forward ? segs : segs.reversed.toList();
+  for (int k = 0; k < order.length; k++) {
+    final stripe = bestStripes[order[k]];
 
-      for (final s in segOrder) {
-        final x1 = forward ? s.$1 : s.$2;
-        final x2 = forward ? s.$2 : s.$1;
+    // Концы полосы в world (строго параллельные линии)
+    final a = uvToWorld(stripe.uMin, stripe.v);
+    final b = uvToWorld(stripe.uMax, stripe.v);
 
-        final a = Offset(x1, y);
-        final b = Offset(x2, y);
+    // Выбираем, с какого конца заходить — чтобы было меньше "диагонального подъезда"
+    final distA = _dist2(cur, a);
+    final distB = _dist2(cur, b);
+    final startEnd = (distA <= distB) ? a : b;
+    final finishEnd = (startEnd == a) ? b : a;
 
-        // 1) подъезд к началу сегмента без диагонали: сначала по X или по Y
-        _appendOrthMove(out, forbiddens, from: cur, to: a, cornerRadius: r);
-        cur = out.last;
+    // Подъезд к началу полосы (короткий)
+    _appendSafeLine(out, g, cur, startEnd,
+        allowBlue: true, samples: 18, mapState: mapState, enforceForbidden: true);
+    cur = out.last;
 
-        // 2) основной проход — строго горизонтальная прямая
-        if (!_appendSafeStraight(out, b, forbiddens)) {
-          // если упёрлись в красную (внутри сегмента не должно, но на границах бывает) — продолжаем дальше
-          cur = out.last;
-          continue;
-        }
-        cur = out.last;
-      }
+    // Основной прямой проход по полосе (СТРОГО ПРЯМОЙ)
+    _appendSafeLine(out, g, cur, finishEnd,
+        allowBlue: true, samples: 30, mapState: mapState, enforceForbidden: true);
+    cur = out.last;
 
-      // 3) переход на следующую полосу (если есть) — строго вертикально + скругление
-      // forward меняем после каждой полосы (классическая змейка)
-      forward = !forward;
-    }
-  } else {
-    final n = math.max(1, ((maxX - minX) / step).ceil() + 1);
-    final k0 = ((start.dx - minX) / step).round().clamp(0, n - 1);
+    // Плавный разворот к следующей полосе (без диагональной линии через всю зону)
+    if (k != order.length - 1) {
+      final nextStripe = bestStripes[order[k + 1]];
+      final nextA = uvToWorld(nextStripe.uMin, nextStripe.v);
+      final nextB = uvToWorld(nextStripe.uMax, nextStripe.v);
 
-    final order = <int>[];
-    for (int d = 0; d < n; d++) {
-      final left = k0 - d;
-      final right = k0 + d;
-      if (d == 0) {
-        order.add(k0);
-      } else {
-        if (left >= 0) order.add(left);
-        if (right < n) order.add(right);
-      }
-      if (order.length >= n) break;
-    }
+      // Куда входить в следующую — противоположный конец, чтобы змейка шла "туда-сюда"
+      final nextStart = forward ? nextB : nextA;
 
-    for (int idx = 0; idx < order.length; idx++) {
-      final k = order[idx];
-      final x = minX + k * step;
+      // ПОВОРОТ: делаем плавную S-кривую (Bezier) вблизи конца текущей полосы,
+      // чтобы не появлялись диагональные линии через всю зону.
+      final r = math.max(0.1, turnRadiusCells * g.cellSize);
+      _appendSmoothTurnBezier(out, g,
+          from: cur,
+          to: nextStart,
+          dir: bestDir,
+          radius: r,
+          allowBlue: true,
+          mapState: mapState,
+          enforceForbidden: true);
 
-      final segs = _clipVerticalLineToPolygon(
-        x: x,
-        zone: zone,
-        forbiddens: forbiddens,
-      );
-      if (segs.isEmpty) continue;
-
-      segs.sort((a, b) => a.$1.compareTo(b.$1));
-      final segOrder = forward ? segs : segs.reversed.toList();
-
-      for (final s in segOrder) {
-        final y1 = forward ? s.$1 : s.$2;
-        final y2 = forward ? s.$2 : s.$1;
-
-        final a = Offset(x, y1);
-        final b = Offset(x, y2);
-
-        _appendOrthMove(out, forbiddens, from: cur, to: a, cornerRadius: r);
-        cur = out.last;
-
-        if (!_appendSafeStraight(out, b, forbiddens)) {
-          cur = out.last;
-          continue;
-        }
-        cur = out.last;
-      }
-
+      cur = out.last;
       forward = !forward;
     }
   }
 
-  final cleaned = _simplify(out, minDist: math.max(0.05, step * 0.12));
-  if (cleaned.length <= 1) return const [];
-  return cleaned;
+  return _simplify(out, minDist: g.cellSize * 0.08);
 }
 
-/// Ортогональный ход без диагонали:
-/// идём либо (X потом Y), либо (Y потом X) — выбираем безопасный вариант.
-/// На углу делаем скругление радиусом cornerRadius (если > 0).
-void _appendOrthMove(
-  List<Offset> out,
-  List<_Poly> forbiddens, {
-  required Offset from,
-  required Offset to,
-  required double cornerRadius,
+List<_Stripe> _buildStripesFromGreen(
+  GridMap g,
+  Set<I2> greenCells, {
+  required _Dir dir,
+  required double stepWorld,
 }) {
-  if ((from - to).distance < 1e-6) return;
+  final n = _Dir(-dir.y, dir.x);
 
-  final p1 = Offset(to.dx, from.dy); // X потом Y
-  final p2 = Offset(from.dx, to.dy); // Y потом X
-
-  bool okPath(List<Offset> pts) {
-    for (int i = 0; i < pts.length - 1; i++) {
-      if (_segmentHitsForbidden(pts[i], pts[i + 1], forbiddens, samples: 80))
-        return false;
-    }
-    return true;
+  // точки центров клеток
+  final pts = <Pt>[];
+  for (final c in greenCells) {
+    pts.add(cellCenter(g, c.x, c.y));
   }
 
-  List<Offset> pathA = [from, p1, to];
-  List<Offset> pathB = [from, p2, to];
+  double dot(Pt p, _Dir a) => p.x * a.x + p.y * a.y;
 
-  final useA = okPath(pathA);
-  final useB = okPath(pathB);
-
-  List<Offset> chosen;
-  if (useA && !useB) {
-    chosen = pathA;
-  } else if (!useA && useB) {
-    chosen = pathB;
-  } else if (useA && useB) {
-    // оба можно — выбираем с меньшей длиной
-    final lenA = (from - p1).distance + (p1 - to).distance;
-    final lenB = (from - p2).distance + (p2 - to).distance;
-    chosen = lenA <= lenB ? pathA : pathB;
-  } else {
-    // оба режутся красным — ничего не делаем (лучше чем заехать в красную)
-    return;
+  // диапазон v
+  double minV = double.infinity;
+  double maxV = -double.infinity;
+  for (final p in pts) {
+    final v = dot(p, n);
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
   }
 
-  // Добавляем с возможным скруглением угла:
-  // from -> corner -> to
-  final corner = chosen[1];
+  // уровни полос: v = minV + i*stepWorld
+  final stripes = <_Stripe>[];
+  if (minV == double.infinity) return stripes;
+  if (stepWorld <= 1e-9) return stripes; // Защита от деления на ноль
 
-  // Если скруглять нельзя/не нужно:
-  if (cornerRadius <= 1e-6 ||
-      (from - corner).distance < cornerRadius * 1.2 ||
-      (corner - to).distance < cornerRadius * 1.2) {
-    _appendSafeStraight(out, corner, forbiddens);
-    _appendSafeStraight(out, to, forbiddens);
-    return;
-  }
+  final count = ((maxV - minV) / stepWorld).ceil() + 1;
+  final half = stepWorld * 0.55; // ширина захвата полосы (чтобы не было дыр)
 
-  // Скругление: заменяем вершину двумя точками + дуга четверти окружности
-  final v1 = (corner - from);
-  final v2 = (to - corner);
+  for (int i = 0; i < count; i++) {
+    final vLevel = minV + i * stepWorld;
+    double uMin = double.infinity;
+    double uMax = -double.infinity;
 
-  // нормализуем направления
-  final d1 = Offset(v1.dx / v1.distance, v1.dy / v1.distance);
-  final d2 = Offset(v2.dx / v2.distance, v2.dy / v2.distance);
-
-  final a = corner - d1 * cornerRadius;
-  final b = corner + d2 * cornerRadius;
-
-  // Проверим, что a->b скругление не залезет в красную: добавим дугу 10 точек
-  // Определим центр дуги для осевого поворота на 90°
-  // Для осевых ходов центр = пересечение смещённых на r линий.
-  // Проще: используем квадратичную аппроксимацию (без идеальной окружности), но без диагонали.
-  // Сгенерируем 10 точек Bezier от a до b с контрольной точкой corner.
-  final arcPts = <Offset>[];
-  const n = 10;
-  for (int i = 1; i < n; i++) {
-    final t = i / n;
-    // Quadratic Bezier: (1-t)^2*A + 2(1-t)t*C + t^2*B
-    final u = 1 - t;
-    final p = Offset(
-      u * u * a.dx + 2 * u * t * corner.dx + t * t * b.dx,
-      u * u * a.dy + 2 * u * t * corner.dy + t * t * b.dy,
-    );
-    arcPts.add(p);
-  }
-
-  // Добавляем: from -> a
-  _appendSafeStraight(out, a, forbiddens);
-  // дуга
-  for (final p in arcPts) {
-    _appendSafeStraight(out, p, forbiddens);
-  }
-  // b -> to
-  _appendSafeStraight(out, b, forbiddens);
-  _appendSafeStraight(out, to, forbiddens);
-}
-
-/// добавляет target прямым отрезком, но не заезжает в красное.
-/// если пересекает — обрезает до последней безопасной точки.
-bool _appendSafeStraight(
-    List<Offset> out, Offset target, List<_Poly> forbiddens) {
-  if (out.isEmpty) {
-    if (!_pointInAnyPolygon(target, forbiddens)) out.add(target);
-    return true;
-  }
-
-  final from = out.last;
-  if ((from - target).distance < 1e-6) return true;
-
-  // target в красном — бинарный поиск последней безопасной точки
-  if (_pointInAnyPolygon(target, forbiddens)) {
-    final safe = _binarySearchLastSafeOnSegment(from, target, forbiddens);
-    if (safe != null && (from - safe).distance > 1e-3) out.add(safe);
-    return false;
-  }
-
-  // сегмент пересекает красный — тоже обрезаем
-  if (_segmentHitsForbidden(from, target, forbiddens, samples: 90)) {
-    final safe = _binarySearchLastSafeOnSegment(from, target, forbiddens);
-    if (safe != null && (from - safe).distance > 1e-3) out.add(safe);
-    return false;
-  }
-
-  out.add(target);
-  return true;
-}
-
-Offset? _binarySearchLastSafeOnSegment(
-    Offset a, Offset b, List<_Poly> forbiddens) {
-  double lo = 0.0, hi = 1.0;
-  Offset best = a;
-
-  for (int it = 0; it < 28; it++) {
-    final mid = (lo + hi) * 0.5;
-    final p = Offset(
-      a.dx + (b.dx - a.dx) * mid,
-      a.dy + (b.dy - a.dy) * mid,
-    );
-
-    final bad = _pointInAnyPolygon(p, forbiddens);
-    if (bad) {
-      hi = mid;
-    } else {
-      best = p;
-      lo = mid;
-    }
-  }
-
-  if ((best - a).distance < 1e-3) return null;
-  return best;
-}
-
-/// ==========================
-/// КЛИППИНГ ЛИНИЙ В ПОЛИГОН
-/// ==========================
-
-List<(double, double)> _clipHorizontalLineToPolygon({
-  required double y,
-  required List<Offset> zone,
-  required List<_Poly> forbiddens,
-}) {
-  final inside = _horizontalIntervalsInsidePolygon(y, zone);
-  if (inside.isEmpty) return const [];
-
-  var res = inside;
-  for (final f in forbiddens) {
-    final cut = _horizontalIntervalsInsidePolygon(y, f.points);
-    if (cut.isEmpty) continue;
-    res = _subtractIntervals(res, cut);
-    if (res.isEmpty) break;
-  }
-
-  // небольшая усадка, чтобы не “лизать” границу красного
-  const eps = 1e-3;
-  final cleaned = <(double, double)>[];
-  for (final s in res) {
-    final a = s.$1 + eps;
-    final b = s.$2 - eps;
-    if (b > a) cleaned.add((a, b));
-  }
-  return cleaned;
-}
-
-List<(double, double)> _clipVerticalLineToPolygon({
-  required double x,
-  required List<Offset> zone,
-  required List<_Poly> forbiddens,
-}) {
-  final inside = _verticalIntervalsInsidePolygon(x, zone);
-  if (inside.isEmpty) return const [];
-
-  var res = inside;
-  for (final f in forbiddens) {
-    final cut = _verticalIntervalsInsidePolygon(x, f.points);
-    if (cut.isEmpty) continue;
-    res = _subtractIntervals(res, cut);
-    if (res.isEmpty) break;
-  }
-
-  const eps = 1e-3;
-  final cleaned = <(double, double)>[];
-  for (final s in res) {
-    final a = s.$1 + eps;
-    final b = s.$2 - eps;
-    if (b > a) cleaned.add((a, b));
-  }
-  return cleaned;
-}
-
-List<(double, double)> _horizontalIntervalsInsidePolygon(
-    double y, List<Offset> poly) {
-  if (poly.length < 3) return const [];
-  final xs = <double>[];
-
-  for (int i = 0; i < poly.length; i++) {
-    final a = poly[i];
-    final b = poly[(i + 1) % poly.length];
-    final y1 = a.dy, y2 = b.dy;
-
-    if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) {
-      final t = (y - y1) / (y2 - y1);
-      final x = a.dx + (b.dx - a.dx) * t;
-      xs.add(x);
-    }
-  }
-
-  xs.sort();
-  if (xs.length < 2) return const [];
-  final res = <(double, double)>[];
-  for (int i = 0; i + 1 < xs.length; i += 2) {
-    final x1 = xs[i];
-    final x2 = xs[i + 1];
-    if (x2 > x1) res.add((x1, x2));
-  }
-  return res;
-}
-
-List<(double, double)> _verticalIntervalsInsidePolygon(
-    double x, List<Offset> poly) {
-  if (poly.length < 3) return const [];
-  final ys = <double>[];
-
-  for (int i = 0; i < poly.length; i++) {
-    final a = poly[i];
-    final b = poly[(i + 1) % poly.length];
-    final x1 = a.dx, x2 = b.dx;
-
-    if ((x1 <= x && x < x2) || (x2 <= x && x < x1)) {
-      final t = (x - x1) / (x2 - x1);
-      final y = a.dy + (b.dy - a.dy) * t;
-      ys.add(y);
-    }
-  }
-
-  ys.sort();
-  if (ys.length < 2) return const [];
-  final res = <(double, double)>[];
-  for (int i = 0; i + 1 < ys.length; i += 2) {
-    final y1 = ys[i];
-    final y2 = ys[i + 1];
-    if (y2 > y1) res.add((y1, y2));
-  }
-  return res;
-}
-
-List<(double, double)> _subtractIntervals(
-    List<(double, double)> base, List<(double, double)> cut) {
-  if (base.isEmpty) return const [];
-  if (cut.isEmpty) return base;
-
-  final b = base.toList()..sort((a, c) => a.$1.compareTo(c.$1));
-  final c = cut.toList()..sort((a, d) => a.$1.compareTo(d.$1));
-
-  final res = <(double, double)>[];
-  int j = 0;
-
-  for (final seg in b) {
-    double a = seg.$1;
-    double e = seg.$2;
-
-    while (j < c.length && c[j].$2 <= a) {
-      j++;
-    }
-
-    double cur = a;
-    int jj = j;
-
-    while (jj < c.length && c[jj].$1 < e) {
-      final ca = c[jj].$1;
-      final ce = c[jj].$2;
-
-      if (ce <= cur) {
-        jj++;
-        continue;
+    for (final p in pts) {
+      final v = dot(p, n);
+      if ((v - vLevel).abs() <= half) {
+        final u = dot(p, dir);
+        if (u < uMin) uMin = u;
+        if (u > uMax) uMax = u;
       }
-      if (ca > cur) {
-        res.add((cur, math.min(ca, e)));
-      }
-      cur = math.max(cur, ce);
-      if (cur >= e) break;
-      jj++;
     }
 
-    if (cur < e) res.add((cur, e));
+    if (uMin.isFinite && uMax.isFinite && (uMax - uMin) > 1e-6) {
+      stripes.add(_Stripe(v: vLevel, uMin: uMin, uMax: uMax));
+    }
   }
 
-  final out = <(double, double)>[];
-  for (final s in res) {
-    if (s.$2 - s.$1 > 1e-6) out.add(s);
-  }
-  return out;
+  return stripes;
 }
 
-/// ==========================
-/// ГЕОМЕТРИЯ / ПРОВЕРКИ
-/// ==========================
+// =============================================================
+// DRAW / TURN HELPERS
+// =============================================================
 
-bool _pointInPolygon(Offset point, List<Offset> polygon) {
-  if (polygon.length < 3) return false;
-  bool inside = false;
-  int j = polygon.length - 1;
+bool _samePt(Pt a, Pt b) => (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9;
 
-  for (int i = 0; i < polygon.length; i++) {
-    final xi = polygon[i].dx;
-    final yi = polygon[i].dy;
-    final xj = polygon[j].dx;
-    final yj = polygon[j].dy;
-
-    final intersect = ((yi > point.dy) != (yj > point.dy)) &&
-        (point.dx < (xj - xi) * (point.dy - yi) / ((yj - yi) + 1e-12) + xi);
-    if (intersect) inside = !inside;
-    j = i;
-  }
-  return inside;
+double _dist2(Pt a, Pt b) {
+  final dx = a.x - b.x;
+  final dy = a.y - b.y;
+  return dx * dx + dy * dy;
 }
 
-bool _pointInAnyPolygon(Offset p, List<_Poly> polys) {
-  for (final poly in polys) {
-    if (_pointInPolygon(p, poly.points)) return true;
-  }
-  return false;
-}
+/// Прямая с safety-проверкой
+void _appendSafeLine(
+  List<Pt> out,
+  GridMap g,
+  Pt from,
+  Pt to, {
+  required bool allowBlue,
+  required int samples,
+  required ManualMapState mapState,
+  required bool enforceForbidden,
+}) {
+  if (_samePt(from, to)) return;
 
-bool _segmentHitsForbidden(Offset a, Offset b, List<_Poly> forbiddens,
-    {int samples = 60}) {
-  if (forbiddens.isEmpty) return false;
-  if (_pointInAnyPolygon(a, forbiddens)) return true;
-  if (_pointInAnyPolygon(b, forbiddens)) return true;
+  Pt last = out.isEmpty ? from : out.last;
+  if (!_samePt(last, from)) out.add(from);
 
-  for (int i = 1; i < samples; i++) {
+  for (int i = 1; i <= samples; i++) {
     final t = i / samples;
-    final p = Offset(
-      a.dx + (b.dx - a.dx) * t,
-      a.dy + (b.dy - a.dy) * t,
+    final p = Pt(
+      from.x + (to.x - from.x) * t,
+      from.y + (to.y - from.y) * t,
     );
-    if (_pointInAnyPolygon(p, forbiddens)) return true;
-  }
-  return false;
-}
 
-bool _polylineHitsForbidden(List<Offset> line, List<_Poly> forbiddens) {
-  if (line.length < 2) return false;
-  for (int i = 0; i < line.length - 1; i++) {
-    if (_segmentHitsForbidden(line[i], line[i + 1], forbiddens, samples: 80))
-      return true;
-  }
-  return false;
-}
-
-(Offset, double) _projectPointToSegmentWithT(Offset p, Offset a, Offset b) {
-  final ab = b - a;
-  final ap = p - a;
-  final abSq = ab.distanceSquared;
-  if (abSq < 1e-12) return (a, 0.0);
-
-  final t = (ap.dx * ab.dx + ap.dy * ab.dy) / abSq;
-  final tt = t.clamp(0.0, 1.0);
-  final c = a + Offset(ab.dx * tt, ab.dy * tt);
-  return (c, tt);
-}
-
-_PickTransitionResult? _pickNearestTransition(
-    Offset start, List<List<Offset>> transitions) {
-  int bestIdx = -1;
-  int bestSeg = -1;
-  Offset bestSnap = Offset.zero;
-  double bestD = double.infinity;
-
-  for (int ti = 0; ti < transitions.length; ti++) {
-    final t = transitions[ti];
-    if (t.length < 2) continue;
-    for (int i = 0; i < t.length - 1; i++) {
-      final a = t[i];
-      final b = t[i + 1];
-      final proj = _projectPointToSegmentWithT(start, a, b);
-      final d = (start - proj.$1).distance;
-      if (d < bestD) {
-        bestD = d;
-        bestIdx = ti;
-        bestSeg = i;
-        bestSnap = proj.$1;
-      }
+    if (enforceForbidden && _isInForbidden(mapState, Offset(p.x, p.y))) {
+      // упёрлись в запрет — прекращаем (в будущем тут будет обход)
+      return;
     }
-  }
 
-  if (bestIdx == -1) return null;
-  return _PickTransitionResult(bestIdx, bestSeg, bestSnap);
+    if (!isPointSafe(g, p, allowBlue: allowBlue)) {
+      return;
+    }
+
+    out.add(p);
+  }
 }
 
-/// ==========================
-/// УПРОЩЕНИЕ
-/// ==========================
+/// Плавный поворот через Bezier-кривую.
+/// Это убирает диагональные "перемычки" через зону и делает змейку визуально ровной.
+void _appendSmoothTurnBezier(
+  List<Pt> out,
+  GridMap g, {
+  required Pt from,
+  required Pt to,
+  required _Dir dir,
+  required double radius,
+  required bool allowBlue,
+  required ManualMapState mapState,
+  required bool enforceForbidden,
+}) {
+  // Контрольные точки: немного вперёд по направлению + к целевой
+  final d = dir.normalized();
+  final c1 = Pt(from.x + d.x * radius, from.y + d.y * radius);
+  final c2 = Pt(to.x - d.x * radius, to.y - d.y * radius);
 
-List<Offset> _simplify(List<Offset> pts, {required double minDist}) {
+  // Семплим кубическую Bezier
+  const int steps = 24;
+  for (int i = 1; i <= steps; i++) {
+    final t = i / steps;
+    final p = _cubicBezier(from, c1, c2, to, t);
+
+    if (enforceForbidden && _isInForbidden(mapState, Offset(p.x, p.y))) {
+      // если в запрете — fallback на прямую (короткую) до to
+      _appendSafeLine(out, g, out.last, to,
+          allowBlue: allowBlue, samples: 18, mapState: mapState, enforceForbidden: enforceForbidden);
+      return;
+    }
+
+    if (!isPointSafe(g, p, allowBlue: allowBlue)) {
+      // fallback
+      _appendSafeLine(out, g, out.last, to,
+          allowBlue: allowBlue, samples: 18, mapState: mapState, enforceForbidden: enforceForbidden);
+      return;
+    }
+
+    out.add(p);
+  }
+}
+
+Pt _cubicBezier(Pt p0, Pt p1, Pt p2, Pt p3, double t) {
+  final u = 1.0 - t;
+  final tt = t * t;
+  final uu = u * u;
+  final uuu = uu * u;
+  final ttt = tt * t;
+
+  final x = p0.x * uuu +
+      3.0 * p1.x * uu * t +
+      3.0 * p2.x * u * tt +
+      p3.x * ttt;
+
+  final y = p0.y * uuu +
+      3.0 * p1.y * uu * t +
+      3.0 * p2.y * u * tt +
+      p3.y * ttt;
+
+  return Pt(x, y);
+}
+
+bool _isInForbidden(ManualMapState mapState, Offset p) {
+  for (final f in mapState.forbiddens) {
+    if (RouteBuilder._pointInPolygon(p, f.points)) return true;
+  }
+  return false;
+}
+
+/// Упрощение пути
+List<Pt> _simplify(List<Pt> pts, {required double minDist}) {
   if (pts.isEmpty) return const [];
-  final out = <Offset>[pts.first];
-  final min2 = minDist * minDist;
+  final out = <Pt>[pts.first];
+
+  final minD2 = minDist * minDist;
 
   for (int i = 1; i < pts.length; i++) {
     final a = out.last;
     final b = pts[i];
-    final dx = b.dx - a.dx;
-    final dy = b.dy - a.dy;
-    if (dx * dx + dy * dy >= min2) out.add(b);
+    final dx = b.x - a.x;
+    final dy = b.y - a.y;
+    if ((dx * dx + dy * dy) >= minD2) {
+      out.add(b);
+    }
   }
-
-  // убираем подряд одинаковые
-  final out2 = <Offset>[];
-  for (final p in out) {
-    if (out2.isEmpty || (out2.last - p).distance > 1e-6) out2.add(p);
-  }
-  return out2;
+  return out;
 }
+
+List<I2> _n4(I2 c) => [
+      I2(c.x + 1, c.y),
+      I2(c.x - 1, c.y),
+      I2(c.x, c.y + 1),
+      I2(c.x, c.y - 1),
+    ];
+
+List<I2> _n8(I2 c) => [
+      I2(c.x + 1, c.y),
+      I2(c.x - 1, c.y),
+      I2(c.x, c.y + 1),
+      I2(c.x, c.y - 1),
+      I2(c.x + 1, c.y + 1),
+      I2(c.x - 1, c.y - 1),
+      I2(c.x + 1, c.y - 1),
+      I2(c.x - 1, c.y + 1),
+    ];

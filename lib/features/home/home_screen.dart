@@ -296,7 +296,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               icon: Icons.sports_esports_rounded,
                               border: accentWhite.withOpacity(0.22),
                               glow: accentWhite.withOpacity(0.12),
-                              onTap: () => context.go('/manual'),
+                              onTap: () => _navigateToManual(context),
                             ),
                           ),
                           SizedBox(width: s(12)),
@@ -309,7 +309,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                               icon: Icons.route_rounded,
                               border: accentWhite.withOpacity(0.22),
                               glow: accentWhite.withOpacity(0.12),
-                              onTap: () => context.go('/auto'),
+                              onTap: () => _navigateToAuto(context),
                             ),
                           ),
                         ],
@@ -351,6 +351,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           },
         );
       },
+    );
+  }
+
+  void _navigateToManual(BuildContext context) {
+    final wifi = ref.read(wifiConnectionProvider);
+    final battery = ref.read(batteryPercentProvider);
+    // Показываем предупреждение только если робот подключен и заряд <= 40%
+    if (wifi.isConnected && battery <= 40) {
+      _showLowBatteryWarning(
+        context,
+        onContinue: () {
+          Navigator.pop(context);
+          context.go('/manual');
+        },
+      );
+    } else {
+      context.go('/manual');
+    }
+  }
+
+  void _navigateToAuto(BuildContext context) {
+    final wifi = ref.read(wifiConnectionProvider);
+    final battery = ref.read(batteryPercentProvider);
+    // Показываем предупреждение только если робот подключен и заряд <= 40%
+    if (wifi.isConnected && battery <= 40) {
+      _showLowBatteryWarning(
+        context,
+        onContinue: () {
+          Navigator.pop(context);
+          context.go('/auto');
+        },
+      );
+    } else {
+      context.go('/auto');
+    }
+  }
+
+  void _showLowBatteryWarning(BuildContext context, {required VoidCallback onContinue}) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.7),
+      builder: (context) => _LowBatteryDialog(
+        batteryPercent: ref.read(batteryPercentProvider),
+        onContinue: onContinue,
+        onCancel: () => Navigator.pop(context),
+      ),
     );
   }
 }
@@ -1117,6 +1163,102 @@ class _CoreOption extends StatelessWidget {
   }
 }
 
+class _BatterySetting extends StatelessWidget {
+  final int value;
+  final ValueChanged<int> onChanged;
+
+  const _BatterySetting({
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Colors.white;
+
+    // Определяем цвет в зависимости от уровня заряда
+    Color batteryColor;
+    if (value <= 20) {
+      batteryColor = const Color(0xFFCC6666);
+    } else if (value <= 50) {
+      batteryColor = const Color(0xFFCCAA66);
+    } else {
+      batteryColor = const Color(0xFF66CC66);
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: Colors.white.withOpacity(0.05),
+        border: Border.all(color: accent.withOpacity(0.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.battery_full_rounded, color: batteryColor, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Заряд батареи',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+              Text(
+                '$value%',
+                style: TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 14,
+                  color: batteryColor,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Slider(
+            value: value.toDouble(),
+            min: 0,
+            max: 100,
+            divisions: 100,
+            activeColor: batteryColor,
+            inactiveColor: Colors.white.withOpacity(0.2),
+            onChanged: (newValue) {
+              onChanged(newValue.round());
+            },
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '0%',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 11,
+                  color: Colors.white.withOpacity(0.5),
+                ),
+              ),
+              Text(
+                '100%',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 11,
+                  color: Colors.white.withOpacity(0.5),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SettingSwitch extends StatelessWidget {
   final String title;
   final String subtitle;
@@ -1250,6 +1392,18 @@ class _QuickSheet extends StatelessWidget {
                   },
                 ),
                 const SizedBox(height: 12),
+                Consumer(
+                  builder: (context, ref, _) {
+                    final batteryPercent = ref.watch(batteryPercentProvider);
+                    return _BatterySetting(
+                      value: batteryPercent,
+                      onChanged: (value) {
+                        ref.read(batteryPercentProvider.notifier).state = value;
+                      },
+                    );
+                  },
+                ),
+                const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
                   child: _WhiteGlassButton(
@@ -1268,17 +1422,121 @@ class _QuickSheet extends StatelessWidget {
 }
 
 /// ============================================================
+/// Low battery warning dialog
+/// ============================================================
+class _LowBatteryDialog extends StatelessWidget {
+  final int batteryPercent;
+  final VoidCallback onContinue;
+  final VoidCallback onCancel;
+
+  const _LowBatteryDialog({
+    required this.batteryPercent,
+    required this.onContinue,
+    required this.onCancel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Colors.white;
+    final batteryColor = batteryPercent <= 20
+        ? const Color(0xFFCC6666)
+        : const Color(0xFFCCAA66);
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(26),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.06),
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(color: batteryColor.withOpacity(0.4)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: batteryColor.withOpacity(0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.battery_alert_rounded,
+                    color: batteryColor,
+                    size: 48,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Низкий заряд батареи',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Заряд батареи: $batteryPercent%\n\nРекомендуется зарядить робота перед началом работы.',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: Colors.white.withOpacity(0.80),
+                    height: 1.4,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    Flexible(
+                      flex: 1,
+                      child: _WhiteGlassButton(
+                        text: 'Отмена',
+                        onPressed: onCancel,
+                        isSecondary: true,
+                        isSmall: true,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      flex: 1,
+                      child: _WhiteGlassButton(
+                        text: 'Продолжить',
+                        onPressed: onContinue,
+                        isSecondary: false,
+                        isSmall: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ============================================================
 /// Beautiful contrast glass button (bright white with dark text)
 /// ============================================================
 class _WhiteGlassButton extends StatelessWidget {
   final String text;
   final VoidCallback? onPressed;
   final bool isSecondary;
+  final bool isSmall;
 
   const _WhiteGlassButton({
     required this.text,
     this.onPressed,
     this.isSecondary = false,
+    this.isSmall = false,
   });
 
   @override
@@ -1291,7 +1549,10 @@ class _WhiteGlassButton extends StatelessWidget {
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            padding: EdgeInsets.symmetric(
+              horizontal: isSmall ? 12 : 20,
+              vertical: isSmall ? 10 : 14,
+            ),
             decoration: BoxDecoration(
               gradient: isSecondary
                   ? null
@@ -1329,10 +1590,13 @@ class _WhiteGlassButton extends StatelessWidget {
                 text,
                 style: TextStyle(
                   fontWeight: FontWeight.w900,
-                  fontSize: 15,
+                  fontSize: isSmall ? 13 : 15,
                   color: Colors.black.withOpacity(0.92),
                   letterSpacing: 0.3,
                 ),
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.visible,
+                softWrap: true,
               ),
             ),
           ),
@@ -1382,26 +1646,54 @@ class _StatusPanel extends StatelessWidget {
       statusColor = Colors.red; // Красный для "Не подключено"
     }
 
-    return _GlassCard(
-      borderColor: accent.withOpacity(0.32),
-      child: Padding(
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          // Едва заметное неоновое свечение вокруг всей панели
+          BoxShadow(
+            color: statusColor.withOpacity(0.04),
+            blurRadius: 8.0,
+            spreadRadius: 0.2,
+          ),
+          BoxShadow(
+            color: statusColor.withOpacity(0.03),
+            blurRadius: 12.0,
+            spreadRadius: 0.3,
+          ),
+        ],
+      ),
+      child: _GlassCard(
+        borderColor: statusColor.withOpacity(0.15),
+        child: Padding(
         padding: EdgeInsets.symmetric(
           horizontal: u(12).clamp(10.0, 12.0),
           vertical: u(10).clamp(8.0, 10.0),
         ),
         child: Row(
           children: [
-            _BatteryChip(uiScale: uiScale, percent: batteryPercent),
+            _BatteryChip(uiScale: uiScale, percent: batteryPercent, isConnected: wifi.isConnected),
             SizedBox(width: u(10)),
             Expanded(
               child: Row(
                 children: [
-                  Icon(
-                    wifi.isConnected
-                        ? Icons.wifi_rounded
-                        : Icons.wifi_off_rounded,
-                    color: statusColor,
-                    size: u(18).clamp(16.0, 18.0),
+                  Container(
+                    decoration: BoxDecoration(
+                      boxShadow: [
+                        BoxShadow(
+                          color: statusColor.withOpacity(0.06),
+                          blurRadius: 4.0,
+                          spreadRadius: 0.2,
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      wifi.isConnected
+                          ? Icons.wifi_rounded
+                          : Icons.wifi_off_rounded,
+                      color: statusColor,
+                      size: u(18).clamp(16.0, 18.0),
+                    ),
                   ),
                   SizedBox(width: u(8)),
                   Expanded(
@@ -1411,6 +1703,19 @@ class _StatusPanel extends StatelessWidget {
                         fontWeight: FontWeight.w900,
                         fontSize: u(11.5).clamp(10.5, 11.5),
                         color: statusColor,
+                        shadows: [
+                          // Едва заметное неоновое свечение
+                          Shadow(
+                            color: statusColor.withOpacity(0.1),
+                            blurRadius: 4.0,
+                            offset: const Offset(0, 0),
+                          ),
+                          Shadow(
+                            color: statusColor.withOpacity(0.06),
+                            blurRadius: 6.0,
+                            offset: const Offset(0, 0),
+                          ),
+                        ],
                       ),
                       maxLines: 2,
                       softWrap: true,
@@ -1431,6 +1736,7 @@ class _StatusPanel extends StatelessWidget {
           ],
         ),
       ),
+      ),
     );
   }
 }
@@ -1438,12 +1744,33 @@ class _StatusPanel extends StatelessWidget {
 class _BatteryChip extends StatelessWidget {
   final double uiScale;
   final int percent;
-  const _BatteryChip({required this.uiScale, required this.percent});
+  final bool isConnected;
+  const _BatteryChip({
+    required this.uiScale,
+    required this.percent,
+    required this.isConnected,
+  });
 
   @override
   Widget build(BuildContext context) {
     double u(double v) => v * uiScale;
     final p = percent.clamp(0, 100);
+
+    // Определяем цвет в зависимости от уровня заряда и подключения
+    Color batteryColor;
+    if (!isConnected) {
+      // Серый цвет, когда робот не подключен
+      batteryColor = const Color(0xFF6E6E6E);
+    } else if (p <= 20) {
+      // Красный для низкого заряда
+      batteryColor = const Color(0xFFCC6666);
+    } else if (p <= 50) {
+      // Желтый для среднего заряда
+      batteryColor = const Color(0xFFCCAA66);
+    } else {
+      // Зеленый для высокого заряда
+      batteryColor = const Color(0xFF66CC66);
+    }
 
     return Container(
       padding: EdgeInsets.symmetric(
@@ -1453,18 +1780,21 @@ class _BatteryChip extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(16),
         color: Colors.white.withOpacity(0.05),
-        border: Border.all(color: Colors.white.withOpacity(0.10)),
+        border: Border.all(color: batteryColor.withOpacity(0.3)),
       ),
       child: Row(
         children: [
           Icon(Icons.battery_full_rounded,
               size: u(18).clamp(16.0, 18.0),
-              color: Colors.white.withOpacity(0.88)),
-          SizedBox(width: u(6)),
-          Text('$p%',
-              style: TextStyle(
-                  fontWeight: FontWeight.w900,
-                  fontSize: u(12.5).clamp(11.0, 12.5))),
+              color: batteryColor),
+          if (isConnected) ...[
+            SizedBox(width: u(6)),
+            Text('$p%',
+                style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: u(12.5).clamp(11.0, 12.5),
+                    color: batteryColor)),
+          ],
         ],
       ),
     );

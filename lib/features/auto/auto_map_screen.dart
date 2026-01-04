@@ -112,16 +112,16 @@ class _AutoMapScreenState extends ConsumerState<AutoMapScreen> {
           case route_builder.RouteErrorCode.noStart:
             errorMsg = 'Стартовая точка не задана.';
             break;
-          case route_builder.RouteErrorCode.noTransitions:
+          case route_builder.RouteErrorCode.greenEmpty:
+            errorMsg = 'Нет зеленых зон для уборки на карте.';
+            break;
+          case route_builder.RouteErrorCode.noBlue:
             errorMsg = 'Нет синих полос (transitions) на карте.';
             break;
-          case route_builder.RouteErrorCode.blueIntersectsForbidden:
-            errorMsg = 'Синяя полоса пересекает запрещенные зоны.';
+          case route_builder.RouteErrorCode.startNotBlueOrGreen:
+            errorMsg = 'Стартовая точка находится в недоступной зоне.';
             break;
-          case route_builder.RouteErrorCode.startToBlueBlocked:
-            errorMsg = 'Стартовая точка недостижима до синей полосы.';
-            break;
-          case route_builder.RouteErrorCode.mowingFailed:
+          case route_builder.RouteErrorCode.buildFailed:
             errorMsg =
                 'Не удалось построить маршрут уборки (нет доступных проходов).';
             break;
