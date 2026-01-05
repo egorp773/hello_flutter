@@ -10,12 +10,14 @@ class WifiConnectionState {
   final bool isConnected;
   final String? error;
   final List<String> rxLog;
+  final int? batteryPercent; // Процент батареи из WebSocket (BAT_PCT)
 
   const WifiConnectionState({
     required this.isConnecting,
     required this.isConnected,
     required this.error,
     required this.rxLog,
+    this.batteryPercent,
   });
 
   factory WifiConnectionState.initial() => const WifiConnectionState(
@@ -23,6 +25,7 @@ class WifiConnectionState {
         isConnected: false,
         error: null,
         rxLog: <String>[],
+        batteryPercent: null,
       );
 
   WifiConnectionState copyWith({
@@ -30,12 +33,14 @@ class WifiConnectionState {
     bool? isConnected,
     String? error,
     List<String>? rxLog,
+    int? batteryPercent,
   }) {
     return WifiConnectionState(
       isConnecting: isConnecting ?? this.isConnecting,
       isConnected: isConnected ?? this.isConnected,
       error: error,
       rxLog: rxLog ?? this.rxLog,
+      batteryPercent: batteryPercent ?? this.batteryPercent,
     );
   }
 }
@@ -299,6 +304,22 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
           _log("← $msgStr");
           final upperMsg = msgStr.toUpperCase();
 
+          // Парсинг BAT_PCT,<int>
+          if (msgStr.startsWith("BAT_PCT,")) {
+            try {
+              final parts = msgStr.split(",");
+              if (parts.length >= 2) {
+                final batteryValue = int.tryParse(parts[1]);
+                if (batteryValue != null && batteryValue >= 0 && batteryValue <= 100) {
+                  state = state.copyWith(batteryPercent: batteryValue);
+                  _log("✓ Battery percent updated: $batteryValue%");
+                }
+              }
+            } catch (e) {
+              _log("× Failed to parse BAT_PCT: $e");
+            }
+          }
+
           // Если получили STATE,CONNECTED - соединение установлено
           if (upperMsg.contains("CONNECTED") || upperMsg.contains("STATE")) {
             if (!connectionEstablished) {
@@ -373,8 +394,12 @@ class WifiConnectionNotifier extends StateNotifier<WifiConnectionState> {
   }
 
   Future<void> disconnect({String? error}) async {
-    state =
-        state.copyWith(isConnecting: false, isConnected: false, error: error);
+    state = state.copyWith(
+      isConnecting: false,
+      isConnected: false,
+      error: error,
+      batteryPercent: null, // Сбрасываем данные батареи при отключении
+    );
 
     _pongWaiter = null;
 

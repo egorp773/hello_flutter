@@ -767,7 +767,12 @@ class _ManualControlScreenState extends ConsumerState<ManualControlScreen> {
   @override
   Widget build(BuildContext context) {
     final wifi = ref.watch(wifiConnectionProvider);
-    final battery = ref.watch(batteryPercentProvider);
+    // Получаем батарею: если включена проверка Wi-Fi - используем только данные из WebSocket, иначе из настроек
+    final pingCheckEnabled = ref.watch(wifiPingCheckProvider);
+    final batteryFromSettings = ref.watch(batteryPercentProvider);
+    final battery = pingCheckEnabled
+        ? (wifi.batteryPercent ?? batteryFromSettings) // При включенной проверке приоритет WebSocket, fallback на настройки
+        : batteryFromSettings; // При выключенной проверке только настройки
     final speed = ref.watch(manualSpeedProvider); // ✅ скорость
     final s = ref.watch(manualMapProvider);
     final notice = ref.watch(noticeProvider);
@@ -1499,6 +1504,7 @@ class _ArrowControls extends ConsumerStatefulWidget {
 class _ArrowControlsState extends ConsumerState<_ArrowControls> {
   Timer? _moveTimer;
   Timer? _positionUpdateTimer;
+  Timer? _safetyTimer; // Таймер безопасности - автоматическая остановка через 3 секунды
   int? _currentLeft;
   int? _currentRight;
 
@@ -1506,6 +1512,7 @@ class _ArrowControlsState extends ConsumerState<_ArrowControls> {
   void dispose() {
     _moveTimer?.cancel();
     _positionUpdateTimer?.cancel();
+    _safetyTimer?.cancel();
     super.dispose();
   }
 
@@ -1545,6 +1552,8 @@ class _ArrowControlsState extends ConsumerState<_ArrowControls> {
       if (!mounted || !widget.enabled) {
         timer.cancel();
         _moveTimer = null;
+        _safetyTimer?.cancel(); // Отменяем таймер безопасности при остановке
+        _safetyTimer = null;
         return;
       }
       final wifi = ref.read(wifiConnectionProvider);
@@ -1556,6 +1565,15 @@ class _ArrowControlsState extends ConsumerState<_ArrowControls> {
       } else {
         timer.cancel();
         _moveTimer = null;
+        _safetyTimer?.cancel(); // Отменяем таймер безопасности при отключении
+        _safetyTimer = null;
+      }
+    });
+
+    // Запускаем таймер безопасности - автоматическая остановка через 3 секунды
+    _safetyTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _currentLeft != null && _currentRight != null) {
+        _stopMoving();
       }
     });
 
@@ -1614,6 +1632,8 @@ class _ArrowControlsState extends ConsumerState<_ArrowControls> {
     _moveTimer = null;
     _positionUpdateTimer?.cancel();
     _positionUpdateTimer = null;
+    _safetyTimer?.cancel(); // Отменяем таймер безопасности
+    _safetyTimer = null;
     _currentLeft = null;
     _currentRight = null;
 

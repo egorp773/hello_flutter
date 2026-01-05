@@ -92,7 +92,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   Widget build(BuildContext context) {
     final wifi = ref.watch(wifiConnectionProvider);
     final core = ref.watch(controlCoreProvider);
-    final battery = ref.watch(batteryPercentProvider);
+    // Получаем батарею: если включена проверка Wi-Fi - используем только данные из WebSocket, иначе из настроек
+    final pingCheckEnabled = ref.watch(wifiPingCheckProvider);
+    final batteryFromSettings = ref.watch(batteryPercentProvider);
+    final battery = pingCheckEnabled
+        ? (wifi.batteryPercent ?? batteryFromSettings) // При включенной проверке приоритет WebSocket, fallback на настройки
+        : batteryFromSettings; // При выключенной проверке только настройки
 
     ref.listen<WifiConnectionState>(wifiConnectionProvider, (prev, next) {
       if (prev == null) return;
