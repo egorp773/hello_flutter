@@ -9,6 +9,7 @@ import '../../core/wifi_connection.dart';
 import '../../core/map_storage.dart';
 import '../../core/route_builder.dart' as route_builder;
 import '../manual/manual_control_screen.dart';
+import '../home/home_screen.dart' show batteryPercentProvider;
 
 class AutoMapScreen extends ConsumerStatefulWidget {
   final String mapId;
@@ -164,6 +165,13 @@ class _AutoMapScreenState extends ConsumerState<AutoMapScreen> {
     final notice = ref.watch(noticeProvider);
     final media = MediaQuery.of(context);
     final safeTop = media.padding.top;
+    
+    // Получаем батарею: если включена проверка Wi-Fi - используем только данные из WebSocket, иначе из настроек
+    final pingCheckEnabled = ref.watch(wifiPingCheckProvider);
+    final batteryFromSettings = ref.watch(batteryPercentProvider);
+    final battery = pingCheckEnabled
+        ? (wifi.batteryPercent ?? batteryFromSettings) // При включенной проверке приоритет WebSocket, fallback на настройки
+        : batteryFromSettings; // При выключенной проверке только настройки
 
     return Scaffold(
       body: LayoutBuilder(builder: (context, constraints) {
@@ -177,6 +185,14 @@ class _AutoMapScreenState extends ConsumerState<AutoMapScreen> {
 
         final topBarH = u(54).clamp(46.0, 54.0);
         final statusH = u(72).clamp(62.0, 72.0);
+
+        final contentH = constraints.maxHeight - safeTop - media.padding.bottom;
+
+        // Вычисляем высоту области кнопок (как в ручном режиме)
+        final baseControls = (contentH * 0.33);
+        final controlsMax = u(270).clamp(220.0, 270.0);
+        final controlsMin = u(215).clamp(190.0, 215.0);
+        final controlsH = baseControls.clamp(controlsMin, controlsMax);
 
         return Stack(
           children: [
@@ -220,157 +236,16 @@ class _AutoMapScreenState extends ConsumerState<AutoMapScreen> {
                     SizedBox(height: gap),
                     SizedBox(
                       height: statusH,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(22),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                          child: Container(
-                            width: double.infinity,
-                            padding: EdgeInsets.all(u(14).clamp(12.0, 14.0)),
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  Colors.white.withOpacity(0.12),
-                                  Colors.white.withOpacity(0.06),
-                                ],
-                              ),
-                              borderRadius: BorderRadius.circular(22),
-                              border:
-                                  Border.all(color: accent.withOpacity(0.32)),
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: u(40).clamp(36.0, 40.0),
-                                  height: u(40).clamp(36.0, 40.0),
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    gradient: RadialGradient(
-                                      colors: [
-                                        accent.withOpacity(0.20),
-                                        accent.withOpacity(0.08),
-                                      ],
-                                    ),
-                                    border: Border.all(
-                                        color: accent.withOpacity(0.35)),
-                                  ),
-                                  child: Icon(
-                                    wifi.isConnected
-                                        ? Icons.wifi_rounded
-                                        : Icons.wifi_off_rounded,
-                                    color: accent,
-                                    size: u(22).clamp(20.0, 22.0),
-                                  ),
-                                ),
-                                SizedBox(width: u(10).clamp(8.0, 10.0)),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        wifi.isConnecting
-                                            ? 'Подключение…'
-                                            : (wifi.isConnected
-                                                ? 'Подключено'
-                                                : 'Не подключено'),
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: u(14).clamp(12.0, 14.0),
-                                          color: wifi.isConnecting
-                                              ? Colors.white
-                                              : (wifi.isConnected
-                                                  ? Colors.green
-                                                  : Colors.red),
-                                        ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                      SizedBox(height: u(3).clamp(2.0, 3.0)),
-                                      Text(
-                                        wifi.isConnected
-                                            ? 'Робот подключен'
-                                            : (wifi.error != null
-                                                ? wifi.error!
-                                                : 'Подключите робота'),
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: u(11).clamp(10.0, 11.0),
-                                          color: Colors.white.withOpacity(0.72),
-                                        ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                SizedBox(width: u(8).clamp(6.0, 8.0)),
-                                InkWell(
-                                  borderRadius: BorderRadius.circular(16),
-                                  onTap: wifi.isConnecting
-                                      ? null
-                                      : _toggleWifiConnection,
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(16),
-                                    child: BackdropFilter(
-                                      filter: ImageFilter.blur(
-                                          sigmaX: 14, sigmaY: 14),
-                                      child: Container(
-                                        padding: EdgeInsets.symmetric(
-                                          horizontal: u(12).clamp(10.0, 12.0),
-                                          vertical: u(8).clamp(6.0, 8.0),
-                                        ),
-                                        decoration: BoxDecoration(
-                                          gradient: LinearGradient(
-                                            begin: Alignment.topLeft,
-                                            end: Alignment.bottomRight,
-                                            colors: [
-                                              accent.withOpacity(0.26),
-                                              Colors.white.withOpacity(0.05)
-                                            ],
-                                          ),
-                                          borderRadius:
-                                              BorderRadius.circular(16),
-                                          border: Border.all(
-                                              color: accent.withOpacity(0.45)),
-                                        ),
-                                        child: wifi.isConnecting
-                                            ? SizedBox(
-                                                width: u(16).clamp(14.0, 16.0),
-                                                height: u(16).clamp(14.0, 16.0),
-                                                child:
-                                                    CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                ),
-                                              )
-                                            : Text(
-                                                wifi.isConnected
-                                                    ? 'Отключить'
-                                                    : 'Подключить',
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.w900,
-                                                  fontSize:
-                                                      u(12).clamp(11.0, 12.0),
-                                                ),
-                                              ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+                      child: _StatusPanel(
+                        uiScale: uiScale,
+                        wifi: wifi,
+                        batteryPercent: battery,
+                        onToggle: _toggleWifiConnection,
                       ),
                     ),
                     SizedBox(height: gap),
-                    // Карта (уменьшенная)
+                    // Карта (такого же размера как в ручном режиме)
                     Expanded(
-                      flex: 2,
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           return _isLoading
@@ -453,16 +328,24 @@ class _AutoMapScreenState extends ConsumerState<AutoMapScreen> {
                       ),
                     ),
                     SizedBox(height: gap),
-                    // Кнопка Построить маршрут
-                    _ActionButton(
-                      icon: Icons.route_rounded,
-                      label: 'Построить маршрут',
-                      onTap: () {
-                        if (_mapState != null) {
-                          _buildRoute(context, ref);
-                        }
-                      },
-                      isPrimary: true,
+                    // Область кнопок снизу
+                    SizedBox(
+                      height: controlsH,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _ActionButton(
+                            icon: Icons.route_rounded,
+                            label: 'Построить маршрут',
+                            onTap: () {
+                              if (_mapState != null) {
+                                _buildRoute(context, ref);
+                              }
+                            },
+                            isPrimary: true,
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -1224,6 +1107,284 @@ class _MiniGlassIcon extends StatelessWidget {
             ),
             child: Icon(icon, color: Colors.white.withOpacity(0.92)),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ============================================================================
+/// Status Panel (унифицированная панель статуса)
+/// ============================================================================
+class _StatusPanel extends StatelessWidget {
+  final double uiScale;
+  final WifiConnectionState wifi;
+  final int batteryPercent;
+  final VoidCallback onToggle;
+
+  const _StatusPanel({
+    required this.uiScale,
+    required this.wifi,
+    required this.batteryPercent,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * uiScale;
+    const accentGray = Color(0xFF6E6E6E);
+    final accent = wifi.isConnected ? Colors.white : accentGray;
+
+    String statusText;
+    Color statusColor;
+    if (wifi.isConnecting) {
+      statusText = 'Подключение…';
+      statusColor = Colors.white;
+    } else if (wifi.isConnected) {
+      statusText = 'Подключено';
+      statusColor = Colors.green;
+    } else if (wifi.error != null) {
+      statusText = wifi.error!;
+      statusColor = Colors.red;
+    } else {
+      statusText = 'Не подключено';
+      statusColor = Colors.red;
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          BoxShadow(
+            color: statusColor.withOpacity(0.04),
+            blurRadius: 8.0,
+            spreadRadius: 0.2,
+          ),
+          BoxShadow(
+            color: statusColor.withOpacity(0.03),
+            blurRadius: 12.0,
+            spreadRadius: 0.3,
+          ),
+        ],
+      ),
+      child: _GlassCard(
+        borderColor: statusColor.withOpacity(0.15),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: u(12).clamp(10.0, 12.0),
+            vertical: u(10).clamp(8.0, 10.0),
+          ),
+          child: Row(
+            children: [
+              _BatteryChip(uiScale: uiScale, percent: batteryPercent, isConnected: wifi.isConnected),
+              SizedBox(width: u(10)),
+              Expanded(
+                child: Row(
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        boxShadow: [
+                          BoxShadow(
+                            color: statusColor.withOpacity(0.06),
+                            blurRadius: 4.0,
+                            spreadRadius: 0.2,
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        wifi.isConnected
+                            ? Icons.wifi_rounded
+                            : Icons.wifi_off_rounded,
+                        color: statusColor,
+                        size: u(18).clamp(16.0, 18.0),
+                      ),
+                    ),
+                    SizedBox(width: u(8)),
+                    Expanded(
+                      child: Text(
+                        statusText,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: u(11.5).clamp(10.5, 11.5),
+                          color: statusColor,
+                          shadows: [
+                            Shadow(
+                              color: statusColor.withOpacity(0.1),
+                              blurRadius: 4.0,
+                              offset: const Offset(0, 0),
+                            ),
+                            Shadow(
+                              color: statusColor.withOpacity(0.06),
+                              blurRadius: 6.0,
+                              offset: const Offset(0, 0),
+                            ),
+                          ],
+                        ),
+                        maxLines: 2,
+                        softWrap: true,
+                        overflow: TextOverflow.visible,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              SizedBox(width: u(10)),
+              _ConnectBtn(
+                uiScale: uiScale,
+                accent: accent,
+                busy: wifi.isConnecting,
+                isConnected: wifi.isConnected,
+                onTap: onToggle,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BatteryChip extends StatelessWidget {
+  final double uiScale;
+  final int percent;
+  final bool isConnected;
+  const _BatteryChip({
+    required this.uiScale,
+    required this.percent,
+    required this.isConnected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * uiScale;
+    final p = percent.clamp(0, 100);
+
+    Color batteryColor;
+    if (!isConnected) {
+      batteryColor = const Color(0xFF6E6E6E);
+    } else if (p <= 20) {
+      batteryColor = const Color(0xFFCC6666);
+    } else if (p <= 50) {
+      batteryColor = const Color(0xFFCCAA66);
+    } else {
+      batteryColor = const Color(0xFF66CC66);
+    }
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: u(10).clamp(8.0, 10.0),
+        vertical: u(8).clamp(6.0, 8.0),
+      ),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(16),
+        color: Colors.white.withOpacity(0.05),
+        border: Border.all(color: batteryColor.withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.battery_full_rounded,
+              size: u(18).clamp(16.0, 18.0),
+              color: batteryColor),
+          if (isConnected) ...[
+            SizedBox(width: u(6)),
+            Text('$p%',
+                style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: u(12.5).clamp(11.0, 12.5),
+                    color: batteryColor)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ConnectBtn extends StatelessWidget {
+  final double uiScale;
+  final Color accent;
+  final bool busy;
+  final bool isConnected;
+  final VoidCallback onTap;
+
+  const _ConnectBtn({
+    required this.uiScale,
+    required this.accent,
+    required this.busy,
+    required this.isConnected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double u(double v) => v * uiScale;
+    final label = isConnected ? 'Отключить' : 'Подключить';
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: busy ? null : onTap,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: u(12).clamp(10.0, 12.0),
+              vertical: u(10).clamp(8.0, 10.0),
+            ),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  accent.withOpacity(0.26),
+                  Colors.white.withOpacity(0.05)
+                ],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: accent.withOpacity(0.45)),
+            ),
+            child: busy
+                ? SizedBox(
+                    width: u(14).clamp(12.0, 14.0),
+                    height: u(14).clamp(12.0, 14.0),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(accent),
+                    ),
+                  )
+                : Text(
+                    label,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: u(12.0).clamp(10.8, 12.0),
+                    ),
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GlassCard extends StatelessWidget {
+  final Widget child;
+  final Color borderColor;
+
+  const _GlassCard({required this.child, required this.borderColor});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: borderColor),
+          ),
+          child: child,
         ),
       ),
     );

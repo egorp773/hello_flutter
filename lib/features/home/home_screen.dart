@@ -361,9 +361,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   void _navigateToManual(BuildContext context) {
     final wifi = ref.read(wifiConnectionProvider);
-    final battery = ref.read(batteryPercentProvider);
+    // Если подключено по Wi-Fi и включена проверка - используем ТОЛЬКО реальные данные из WebSocket
+    // Настройки не учитываются когда подключено по Wi-Fi
+    final pingCheckEnabled = ref.read(wifiPingCheckProvider);
+    final batteryFromSettings = ref.read(batteryPercentProvider);
+    
+    int? battery;
+    if (wifi.isConnected && pingCheckEnabled && wifi.batteryPercent != null) {
+      // Подключено по Wi-Fi - используем ТОЛЬКО реальное значение из WebSocket
+      battery = wifi.batteryPercent;
+    } else {
+      // Не подключено или проверка выключена - используем настройки
+      battery = batteryFromSettings;
+    }
+    
     // Показываем предупреждение только если робот подключен и заряд <= 40%
-    if (wifi.isConnected && battery <= 40) {
+    // Используем то же значение, что и для отображения
+    if (wifi.isConnected && battery != null && battery <= 40) {
       _showLowBatteryWarning(
         context,
         onContinue: () {
@@ -378,9 +392,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   void _navigateToAuto(BuildContext context) {
     final wifi = ref.read(wifiConnectionProvider);
-    final battery = ref.read(batteryPercentProvider);
+    // Если подключено по Wi-Fi и включена проверка - используем ТОЛЬКО реальные данные из WebSocket
+    // Настройки не учитываются когда подключено по Wi-Fi
+    final pingCheckEnabled = ref.read(wifiPingCheckProvider);
+    final batteryFromSettings = ref.read(batteryPercentProvider);
+    
+    int? battery;
+    if (wifi.isConnected && pingCheckEnabled && wifi.batteryPercent != null) {
+      // Подключено по Wi-Fi - используем ТОЛЬКО реальное значение из WebSocket
+      battery = wifi.batteryPercent;
+    } else {
+      // Не подключено или проверка выключена - используем настройки
+      battery = batteryFromSettings;
+    }
+    
     // Показываем предупреждение только если робот подключен и заряд <= 40%
-    if (wifi.isConnected && battery <= 40) {
+    // Используем то же значение, что и для отображения
+    if (wifi.isConnected && battery != null && battery <= 40) {
       _showLowBatteryWarning(
         context,
         onContinue: () {
